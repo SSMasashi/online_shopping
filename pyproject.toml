@@ -1,0 +1,19 @@
+[project]
+name = "multi-agent-course"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "SSMasashi", email = "8341ogas34@gmail.com" }
+]
+requires-python = ">=3.7"
+dependencies = [
+    "requests>=2.31.0",
+]
+
+[project.scripts]
+multi-agent-course = "multi_agent_course:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
