@@ -1,19 +1,32 @@
 [project]
-name = "multi-agent-course"
+name = "online-shopping"
 version = "0.1.0"
-description = "Add your description here"
+description = "Amazonと楽天の最安値を振り分けるStreamlitアプリ"
 readme = "README.md"
 authors = [
     { name = "SSMasashi", email = "8341ogas34@gmail.com" }
 ]
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 dependencies = [
-    "requests>=2.31.0",
+    "google-auth>=2.58.0",
+    "gspread>=6.2.1",
+    "streamlit>=1.64.0",
 ]
 
-[project.scripts]
-multi-agent-course = "multi_agent_course:main"
+[dependency-groups]
+dev = [
+    "pytest>=7.4.4",
+    "ruff>=0.16.9",
+]
 
-[build-system]
-requires = ["uv_build>=0.12.17,<0.13.0"]
-build-backend = "uv_build"
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.format]
+skip-magic-trailing-comma = true
+
+[tool.ruff.lint.isort]
+split-on-trailing-comma = false

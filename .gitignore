@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Streamlit の秘密情報（Streamlit Cloud 側の Secrets で管理する）
+.streamlit/secrets.toml
