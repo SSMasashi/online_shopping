@@ -186,6 +186,19 @@ def fetch_item_page(url):
         return raw.decode("utf-8", errors="replace")
 
 
+def _describe_page(html):
+    """原因調査のため、取得した商品ページの概要を文字列にする。"""
+
+    title = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+    title_text = re.sub(r"\s+", " ", title.group(1)).strip()[:60] if title else "(なし)"
+    markers = ", ".join(
+        f"{name}:{'あり' if name in html else 'なし'}"
+        for name in ("manageNumber", "itemId", "item_id=")
+    )
+
+    return f"（{len(html)}文字 / タイトル: {title_text} / {markers}）"
+
+
 def _fetch_via_item_page(shop, slug, app_id, access_key, referer, call_api, fetch_page):
     """
     商品ページから内部番号を読み取り、その itemCode で API から取得する。
@@ -198,7 +211,7 @@ def _fetch_via_item_page(shop, slug, app_id, access_key, referer, call_api, fetc
         item_id = extract_item_id(html, slug)
 
         if item_id is None:
-            return None, "内部番号が見つかりませんでした"
+            return None, "内部番号が見つかりませんでした" + _describe_page(html)
 
         data = call_api({"itemCode": f"{shop}:{item_id}"}, app_id, access_key, referer)
 

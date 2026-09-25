@@ -744,3 +744,26 @@ class TestFetchViaItemPage:
             self.URL, "app", "key", "referer", call_api=fake, fetch_page=must_not_fetch
         )
         assert price == 500.0
+
+
+class TestItemPageDiagnostics:
+    """商品ページで内部番号が見つからないとき、原因調査用の情報をメッセージに出すテスト。"""
+
+    def test_ページのタイトルと文字数と手がかりの有無がメッセージに入る(self):
+        page = "<html><head><title>アクセスが集中しています</title></head><body>wait</body></html>"
+        fake = FakeCallApi([RakutenApiError("itemCode is not valid", status=400), EMPTY_ITEMS])
+
+        with pytest.raises(ValueError) as exc:
+            fetch_rakuten_price_and_point(
+                "https://item.rakuten.co.jp/netbaby/a62938xxx/",
+                "app",
+                "key",
+                "referer",
+                call_api=fake,
+                fetch_page=lambda url: page,
+            )
+
+        message = str(exc.value)
+        assert "アクセスが集中しています" in message
+        assert f"{len(page)}文字" in message
+        assert "manageNumber:なし" in message
