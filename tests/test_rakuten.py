@@ -16,6 +16,7 @@ import pytest
 from shopping.rakuten import (
     RakutenApiError,
     call_rakuten_api,
+    extract_item_id,
     extract_shop_and_slug,
     fetch_rakuten_price_and_point,
     parse_item,
@@ -76,6 +77,16 @@ def wrap_items(*items):
     """Item群を Items: [{"Item": ...}, ...] の形にラップする。"""
 
     return {"Items": [{"Item": item} for item in items]}
+
+
+@pytest.fixture(autouse=True)
+def no_real_item_page(monkeypatch):
+    """テスト中に本物の楽天の商品ページへアクセスしないよう、既定のページ取得を失敗させる。"""
+
+    def fail(url):
+        raise RakutenApiError("テストでは商品ページを取得しない")
+
+    monkeypatch.setattr("shopping.rakuten.fetch_item_page", fail)
 
 
 EMPTY_ITEMS = {"Items": []}
@@ -621,3 +632,115 @@ class TestCallRakutenApi:
         result = call_rakuten_api({"itemCode": DEFAULT_ITEM_CODE}, "app", "key", "referer")
 
         assert result == {"Items": []}
+
+
+# ===========================================================================
+# 商品ページから内部番号（itemId）を読み取る
+# ===========================================================================
+
+PAGE_SLUG = "a62938xxx"
+
+PAGE_WITH_SKU = (
+    '<html><script>var x = {"itemInfoSku":{"shopId":"212232","manageNumber":"A62938XXX",'
+    '"notification":false,"itemId":10023957,"is39Shop":true}};</script>'
+    '<img src="https://mall.ashiato.rakuten.co.jp/trc?shop_id=212232&amp;item_id=10023957"></html>'
+)
+
+
+class TestExtractItemId:
+    """extract_item_id（商品ページのHTMLから内部番号を取り出す）のテスト。"""
+
+    def test_manageNumberがURLと一致する商品情報からitemIdを取り出す(self):
+        """大文字小文字が違っても manageNumber と slug を同じとみなす。"""
+
+        assert extract_item_id(PAGE_WITH_SKU, PAGE_SLUG) == "10023957"
+
+    def test_manageNumberとitemIdの順番が逆でも取り出せる(self):
+        html = '{"itemId":10023957,"shopId":"1","manageNumber":"a62938xxx"}'
+        assert extract_item_id(html, PAGE_SLUG) == "10023957"
+
+    def test_manageNumberが無くてもitem_idが1種類ならそれを使う(self):
+        html = '<img src="https://example/trc?shop_id=1&amp;item_id=10000001">'
+        assert extract_item_id(html, PAGE_SLUG) == "10000001"
+
+    def test_manageNumberが別の商品ならその商品情報は使わない(self):
+        """別の商品（おすすめ枠など）の itemId を誤って使わない。"""
+
+        html = '{"manageNumber":"other-item","itemId":10099999}'
+        assert extract_item_id(html, PAGE_SLUG) is None
+
+    def test_manageNumberが無くitemIdが複数種類あるときはNone(self):
+        html = '"itemId":10000001 ... item_id=10000002'
+        assert extract_item_id(html, PAGE_SLUG) is None
+
+    def test_itemIdが無ければNone(self):
+        assert extract_item_id("<html>no id</html>", PAGE_SLUG) is None
+
+
+class TestFetchViaItemPage:
+    """itemCode が無効なとき、商品ページの内部番号で取り直す流れのテスト。"""
+
+    URL = "https://item.rakuten.co.jp/netbaby/a62938xxx/?s-id=pc_top&rtg=abc"
+
+    def test_商品ページの内部番号でitemCodeを作り直して取得する(self):
+        item = make_api_item(
+            item_code="netbaby:10023957",
+            item_url="https://item.rakuten.co.jp/netbaby/a62938xxx/",
+            price=13700,
+            point_rate=3,
+        )
+        fake = FakeCallApi([RakutenApiError("itemCode is not valid", status=400), wrap_items(item)])
+        pages = []
+
+        def fake_fetch_page(url):
+            pages.append(url)
+            return PAGE_WITH_SKU
+
+        price, point_rate = fetch_rakuten_price_and_point(
+            self.URL, "app", "key", "referer", call_api=fake, fetch_page=fake_fetch_page
+        )
+
+        assert (price, point_rate) == (13700.0, 3)
+        assert fake.calls[1]["params"] == {"itemCode": "netbaby:10023957"}
+        # 取得するページはクエリ文字列を除いた商品ページだけ
+        assert pages == ["https://item.rakuten.co.jp/netbaby/a62938xxx/"]
+
+    def test_内部番号で取れた商品のURLが違えば採用しない(self):
+        """ページの読み取りを誤っても、別の商品の価格は採用しない。"""
+
+        other = make_api_item(
+            item_code="netbaby:10023957", item_url="https://item.rakuten.co.jp/netbaby/other/"
+        )
+        fake = FakeCallApi(
+            [RakutenApiError("itemCode is not valid", status=400), wrap_items(other), EMPTY_ITEMS]
+        )
+
+        with pytest.raises(ValueError):
+            fetch_rakuten_price_and_point(
+                self.URL, "app", "key", "referer", call_api=fake, fetch_page=lambda u: PAGE_WITH_SKU
+            )
+
+    def test_ページの取得に失敗したらキーワード検索に進み結果をメッセージに残す(self):
+        fake = FakeCallApi([RakutenApiError("itemCode is not valid", status=400), EMPTY_ITEMS])
+
+        def broken_fetch_page(url):
+            raise RakutenApiError("接続できませんでした")
+
+        with pytest.raises(ValueError) as exc:
+            fetch_rakuten_price_and_point(
+                self.URL, "app", "key", "referer", call_api=fake, fetch_page=broken_fetch_page
+            )
+
+        assert "商品ページ" in str(exc.value)
+        assert fake.calls[-1]["params"]["keyword"] == "a62938xxx"
+
+    def test_URLのitemCodeで取れたときは商品ページを取得しない(self):
+        fake = FakeCallApi([wrap_items(make_api_item(price=500))])
+
+        def must_not_fetch(url):
+            raise AssertionError("商品ページを取得してはいけない")
+
+        price, _ = fetch_rakuten_price_and_point(
+            self.URL, "app", "key", "referer", call_api=fake, fetch_page=must_not_fetch
+        )
+        assert price == 500.0
