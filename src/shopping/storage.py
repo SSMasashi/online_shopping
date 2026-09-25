@@ -22,7 +22,12 @@ PRODUCTS_SHEET = "products"
 SETTINGS_SHEET = "settings"
 
 SAVED_DATA_HEADERS = ["save_id", "name", "saved_at"]
-PRODUCT_HEADERS = ["save_id", "name", "ap", "apt", "baby", "rp", "rpt", "rurl"]
+# aurl（Amazon URL メモ）と qty（個数）は後から追加した列。
+PRODUCT_HEADERS = ["save_id", "name", "ap", "apt", "baby", "rp", "rpt", "rurl", "aurl", "qty"]
+
+# 列を追加する前の見出し。読み込みはそのまま行い、保存時に新しい見出しへ置き換える。
+LEGACY_PRODUCT_HEADERS = [PRODUCT_HEADERS[:8]]
+
 SETTING_HEADERS = ["save_id", "setting", "value"]
 
 SETTING_DEFAULTS = {"max_shops": 10, "min_shop_price": 1000, "bonus_cap": 7000, "spu_multiplier": 0}
@@ -58,7 +63,17 @@ def normalize_bool(value):
 def make_default_product():
     """新規商品の初期値。"""
 
-    return {"name": "", "ap": 0, "apt": 1, "baby": False, "rp": 0, "rpt": 0, "rurl": ""}
+    return {
+        "name": "",
+        "ap": 0,
+        "apt": 1,
+        "baby": False,
+        "rp": 0,
+        "rpt": 0,
+        "rurl": "",
+        "aurl": "",
+        "qty": 1,
+    }
 
 
 # ===========================================================================
@@ -66,8 +81,12 @@ def make_default_product():
 # ===========================================================================
 
 
-def _column_reader(values, headers):
-    """見出し行から列の位置を探し、行から列名で値を読む関数を返す。見出しが合わなければ None。"""
+def _column_reader(values, headers, optional=()):
+    """
+    見出し行から列の位置を探し、行から列名で値を読む関数を返す。
+
+    headers の列が1つでも無ければ None。optional の列は無くてもよく、その場合は空文字を返す。
+    """
 
     if not values:
         return None
@@ -79,9 +98,11 @@ def _column_reader(values, headers):
     except ValueError:
         return None
 
+    indexes.update({name: header.index(name) for name in optional if name in header})
+
     def cell(row, name):
-        idx = indexes[name]
-        return row[idx] if idx < len(row) else ""
+        idx = indexes.get(name)
+        return row[idx] if idx is not None and idx < len(row) else ""
 
     return cell
 
@@ -113,7 +134,7 @@ def parse_saved_data(values):
 def parse_products(values, save_id):
     """products シートの値から、指定 save_id の商品リストを作る。"""
 
-    cell = _column_reader(values, PRODUCT_HEADERS)
+    cell = _column_reader(values, LEGACY_PRODUCT_HEADERS[0], optional=("aurl", "qty"))
 
     if cell is None:
         return []
@@ -136,6 +157,8 @@ def parse_products(values, save_id):
                 "rp": safe_int(cell(row, "rp")),
                 "rpt": safe_int(cell(row, "rpt")),
                 "rurl": str(cell(row, "rurl")),
+                "aurl": str(cell(row, "aurl")),
+                "qty": max(safe_int(cell(row, "qty"), 1), 1),
             }
         )
 
@@ -179,6 +202,8 @@ def product_rows(save_id, products):
             safe_int(item.get("rp", 0)),
             safe_int(item.get("rpt", 0)),
             str(item.get("rurl", "")),
+            str(item.get("aurl", "")),
+            max(safe_int(item.get("qty", 1), 1), 1),
         ]
         for item in products
     ]
@@ -191,7 +216,7 @@ def setting_rows(save_id, settings):
     ]
 
 
-def replace_rows(values, headers, save_id, new_rows):
+def replace_rows(values, headers, save_id, new_rows, legacy_headers=()):
     """
     シートの値のうち save_id の行を new_rows に置き換えた、シート全体の値を返す。
 
@@ -209,7 +234,8 @@ def replace_rows(values, headers, save_id, new_rows):
     while header and header[-1] == "":
         header.pop()
 
-    if header != headers:
+    # 列を追加する前の見出しなら、足りない列を空にして新しい見出しで書き直す。
+    if header != headers and header not in [list(h) for h in legacy_headers]:
         raise ValueError(
             f"シートの見出し行が想定と違うため、書き込みを中止しました（想定: {', '.join(headers)}）"
         )
@@ -262,9 +288,9 @@ class SheetStorage:
         ws = self._worksheet(title, len(headers))
         return ws, ws.get_all_values()
 
-    def _write_rows(self, title, headers, save_id, new_rows):
+    def _write_rows(self, title, headers, save_id, new_rows, legacy_headers=()):
         ws, values = self._read(title, headers)
-        result = replace_rows(values, headers, save_id, new_rows)
+        result = replace_rows(values, headers, save_id, new_rows, legacy_headers)
 
         rows = max(int(ws.row_count), len(result))
         cols = max(int(ws.col_count), len(headers))
@@ -296,7 +322,13 @@ class SheetStorage:
         saved_at = self.clock().strftime("%Y-%m-%d %H:%M:%S")
 
         # 一覧は最後に書く。途中で失敗しても、中身の無い保存データが一覧に載らない。
-        self._write_rows(PRODUCTS_SHEET, PRODUCT_HEADERS, save_id, product_rows(save_id, products))
+        self._write_rows(
+            PRODUCTS_SHEET,
+            PRODUCT_HEADERS,
+            save_id,
+            product_rows(save_id, products),
+            LEGACY_PRODUCT_HEADERS,
+        )
         self._write_rows(SETTINGS_SHEET, SETTING_HEADERS, save_id, setting_rows(save_id, settings))
         self._write_rows(
             SAVED_DATA_SHEET, SAVED_DATA_HEADERS, save_id, [[save_id, save_name, saved_at]]
@@ -339,7 +371,7 @@ class SheetStorage:
 
         # 一覧から先に消す。途中で失敗しても、一覧に載った中身の無いデータは残らない。
         self._write_rows(SAVED_DATA_SHEET, SAVED_DATA_HEADERS, save_id, [])
-        self._write_rows(PRODUCTS_SHEET, PRODUCT_HEADERS, save_id, [])
+        self._write_rows(PRODUCTS_SHEET, PRODUCT_HEADERS, save_id, [], LEGACY_PRODUCT_HEADERS)
         self._write_rows(SETTINGS_SHEET, SETTING_HEADERS, save_id, [])
 
         return [r for r in records if r["save_id"] != save_id]

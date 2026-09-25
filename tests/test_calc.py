@@ -11,11 +11,13 @@ import pytest
 from shopping.calc import (
     MAX_PRODUCTS,
     amazon_cost,
+    available_stores,
     calculate_item_results,
     calculate_rakuten_bonus,
     calculate_rakuten_shop_count,
     evaluate,
     find_best,
+    quantity,
     rakuten_rate_from_api,
     tax_excluded_price,
 )
@@ -612,3 +614,117 @@ class TestMaxProducts:
         items = [make_item(name=f"商品{i}") for i in range(MAX_PRODUCTS + 1)]
         with pytest.raises(ValueError, match="15"):
             find_best(items, max_shops=10, min_shop_price=1000, bonus_cap=7000, spu_multiplier=0)
+
+
+# ===========================================================================
+# 価格0円 = その店では扱いなし
+# ===========================================================================
+
+
+class TestAvailableStores:
+    """価格が0の店は「扱いなし」として、選択肢から外す。"""
+
+    def test_両方の価格があれば両方選べる(self):
+        assert available_stores(make_item(ap=1000, rp=1000)) == ("A", "R")
+
+    def test_Amazonが0円なら楽天だけ(self):
+        assert available_stores(make_item(ap=0, rp=1000)) == ("R",)
+
+    def test_楽天が0円ならAmazonだけ(self):
+        assert available_stores(make_item(ap=1000, rp=0)) == ("A",)
+
+    def test_両方0円なら選べない(self):
+        assert available_stores(make_item(ap=0, rp=0)) == ()
+
+
+class TestFindBestAvailability:
+    def test_Amazonで扱いのない商品は楽天で買う(self):
+        """0円だからといってAmazonで無料で買えることにしない。"""
+
+        only_rakuten = make_item(name="楽天のみ", ap=0, rp=3000, rpt=4)
+        normal = make_item(name="普通", ap=2000, rp=2100, rpt=2)
+
+        choices, best = find_best(
+            [only_rakuten, normal],
+            max_shops=10,
+            min_shop_price=1000,
+            bonus_cap=7000,
+            spu_multiplier=0,
+        )
+
+        assert choices[0] == "R"
+        assert best["rakuten_paid"] >= 3000
+
+    def test_どちらの店でも扱いのない商品があればValueError(self):
+        with pytest.raises(ValueError, match="価格"):
+            find_best(
+                [make_item(name="未入力", ap=0, rp=0)],
+                max_shops=10,
+                min_shop_price=1000,
+                bonus_cap=7000,
+                spu_multiplier=0,
+            )
+
+
+# ===========================================================================
+# 個数
+# ===========================================================================
+
+
+class TestQuantity:
+    """個数は価格・ポイント・買いまわり判定のすべてに掛かる。"""
+
+    def test_個数が無い商品は1個として扱う(self):
+        item = make_item()
+        item.pop("qty", None)
+        assert quantity(item) == 1
+
+    @pytest.mark.parametrize("qty, expected", [(0, 1), (-2, 1), ("3", 3), (None, 1), ("", 1)])
+    def test_個数は1以上の整数にそろえる(self, qty, expected):
+        assert quantity({**make_item(), "qty": qty}) == expected
+
+    def test_Amazonの価格とポイントは個数倍(self):
+        price, points = amazon_cost({**make_item(ap=1000, apt=5, baby=True), "qty": 3})
+        # 1000円 * 0.9 * 3個 = 2700円、ポイントは5%
+        assert price == pytest.approx(2700.0)
+        assert points == pytest.approx(135.0)
+
+    def test_楽天の買いまわり対象は個数を掛けた金額で判定する(self):
+        """1個600円でも2個なら1200円なので、対象金額1000円以上になる。"""
+
+        items = [{**make_item(rp=600), "qty": 2}]
+        assert calculate_rakuten_shop_count(items, ("R",), min_shop_price=1000) == 1
+
+    def test_evaluateの楽天支払額とポイントは個数倍(self):
+        items = [{**make_item(rp=1100, rpt=2), "qty": 2}]
+        result = evaluate(
+            items, ("R",), max_shops=10, min_shop_price=1000, bonus_cap=7000, spu_multiplier=0
+        )
+        # 税込2200円 → 税抜2000円の2% = 40pt
+        assert result["rakuten_paid"] == pytest.approx(2200.0)
+        assert result["rakuten_base_points"] == pytest.approx(40.0)
+
+    def test_商品ごとの結果に個数と購入先コードとURLが入る(self):
+        items = [
+            {
+                **make_item(name="A商品", ap=1000, apt=1),
+                "qty": 2,
+                "aurl": "https://amazon.example/a",
+            },
+            {
+                **make_item(name="R商品", rp=1100, rpt=1, rurl="https://item.rakuten.co.jp/s/r/"),
+                "qty": 1,
+            },
+        ]
+        choices = ("A", "R")
+        best = evaluate(
+            items, choices, max_shops=10, min_shop_price=1000, bonus_cap=7000, spu_multiplier=0
+        )
+        results = calculate_item_results(items, choices, best, spu_multiplier=0)
+
+        assert results[0]["qty"] == 2
+        assert results[0]["store_code"] == "A"
+        assert results[0]["price"] == pytest.approx(2000.0)
+        assert results[0]["url"] == "https://amazon.example/a"
+        assert results[1]["store_code"] == "R"
+        assert results[1]["url"] == "https://item.rakuten.co.jp/s/r/"

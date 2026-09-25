@@ -34,6 +34,7 @@ from shopping.storage import (
     parse_products,
     parse_saved_data,
     parse_settings,
+    product_rows,
     replace_rows,
     safe_int,
 )
@@ -169,6 +170,8 @@ class TestMakeDefaultProduct:
             "rp": 0,
             "rpt": 0,
             "rurl": "",
+            "aurl": "",
+            "qty": 1,
         }
 
     def test_呼び出すたびに独立したdictが返る(self):
@@ -265,6 +268,8 @@ class TestParseProducts:
                 "rp": 2000,
                 "rpt": 2,
                 "rurl": "https://a.example.com",
+                "aurl": "",
+                "qty": 1,
             }
         ]
 
@@ -283,6 +288,8 @@ class TestParseProducts:
                 "rp": 2000,
                 "rpt": 2,
                 "rurl": "https://a",
+                "aurl": "",
+                "qty": 1,
             }
         ]
 
@@ -302,7 +309,17 @@ class TestParseProducts:
 
         values = [list(PRODUCT_HEADERS), ["id1", "商品1"]]
         assert parse_products(values, "id1") == [
-            {"name": "商品1", "ap": 0, "apt": 1, "baby": False, "rp": 0, "rpt": 0, "rurl": ""}
+            {
+                "name": "商品1",
+                "ap": 0,
+                "apt": 1,
+                "baby": False,
+                "rp": 0,
+                "rpt": 0,
+                "rurl": "",
+                "aurl": "",
+                "qty": 1,
+            }
         ]
 
     def test_save_id以外が全部空の行は飛ばされる(self):
@@ -793,7 +810,7 @@ class TestSheetStorageSave:
             assert sheet_name in spreadsheet.add_worksheet_calls
 
     def test_productsの行の内容と並び順が仕様通り(self):
-        """products行が [save_id, name, ap, apt, baby, rp, rpt, rurl] の順で書かれる。"""
+        """products行が [save_id, name, ap, apt, baby, rp, rpt, rurl, aurl, qty] の順で書かれる。"""
 
         spreadsheet = FakeSpreadsheet({})
         storage = SheetStorage(spreadsheet, clock=fixed_clock())
@@ -804,7 +821,7 @@ class TestSheetStorageSave:
         save_id, _ = storage.save("保存1", [product], dict(SETTING_DEFAULTS))
 
         row = spreadsheet.sheets[PRODUCTS_SHEET].get_all_values()[1]
-        assert row == [save_id, "商品A", 1234, 3, True, 5678, 2, "https://a.example.com"]
+        assert row == [save_id, "商品A", 1234, 3, True, 5678, 2, "https://a.example.com", "", 1]
 
     def test_settingsの行はSETTING_DEFAULTSのキー順に書かれる(self):
         """渡すsettings dictの順序に関わらず、書き込み順はSETTING_DEFAULTSのキー順になる。"""
@@ -1057,3 +1074,84 @@ class TestSheetStorageDelete:
 
         with pytest.raises(ValueError):
             storage.delete("id1")
+
+
+# ===========================================================================
+# Amazon URL と個数の列（古い形式のシートからの移行を含む）
+# ===========================================================================
+
+LEGACY_PRODUCT_HEADERS = ["save_id", "name", "ap", "apt", "baby", "rp", "rpt", "rurl"]
+
+
+class TestProductColumnsForUrlAndQuantity:
+    """products シートに aurl（Amazon URL メモ）と qty（個数）の列を追加する。"""
+
+    def test_見出しの末尾にaurlとqtyがある(self):
+        assert PRODUCT_HEADERS == LEGACY_PRODUCT_HEADERS + ["aurl", "qty"]
+
+    def test_aurlとqtyを読み込める(self):
+        values = [
+            list(PRODUCT_HEADERS),
+            ["id1", "商品", "1000", "1", "FALSE", "1100", "2", "https://r/", "https://a/", "3"],
+        ]
+        product = parse_products(values, "id1")[0]
+        assert product["aurl"] == "https://a/"
+        assert product["qty"] == 3
+
+    def test_古い形式のシートでも読み込めて個数は1になる(self):
+        values = [LEGACY_PRODUCT_HEADERS, ["id1", "商品", "1000", "1", "FALSE", "1100", "2", ""]]
+        product = parse_products(values, "id1")[0]
+        assert product["aurl"] == ""
+        assert product["qty"] == 1
+
+    def test_個数が0や空なら1として読む(self):
+        values = [list(PRODUCT_HEADERS), ["id1", "商品", "1", "1", "", "1", "0", "", "", "0"]]
+        assert parse_products(values, "id1")[0]["qty"] == 1
+
+    def test_保存する行にaurlとqtyが入る(self):
+        rows = product_rows("id1", [{**make_product(name="商品"), "aurl": "https://a/", "qty": 2}])
+        assert rows[0][-2:] == ["https://a/", 2]
+
+    def test_古い形式の見出しは新しい見出しに置き換えて他の保存データを残す(self):
+        values = [
+            LEGACY_PRODUCT_HEADERS,
+            ["other", "他の商品", "500", "1", "FALSE", "600", "1", ""],
+        ]
+        new_rows = product_rows("id1", [make_product(name="新しい商品")])
+
+        result = replace_rows(
+            values, PRODUCT_HEADERS, "id1", new_rows, legacy_headers=[LEGACY_PRODUCT_HEADERS]
+        )
+
+        assert result[0] == list(PRODUCT_HEADERS)
+        assert result[1] == ["other", "他の商品", "500", "1", "FALSE", "600", "1", "", "", ""]
+        assert result[2][1] == "新しい商品"
+
+    def test_古い形式として許可していない見出しはValueErrorのまま(self):
+        values = [["save_id", "name"], ["other", "x"]]
+        with pytest.raises(ValueError):
+            replace_rows(
+                values, PRODUCT_HEADERS, "id1", [], legacy_headers=[LEGACY_PRODUCT_HEADERS]
+            )
+
+    def test_古い形式のシートに保存すると新しい形式になり他の保存データも残る(self):
+        spreadsheet = FakeSpreadsheet(
+            {
+                "saved_data": saved_data_values(["other", "他", "2026-01-01 00:00:00"]),
+                "products": [
+                    LEGACY_PRODUCT_HEADERS,
+                    ["other", "他の商品", "500", "1", "FALSE", "600", "1", ""],
+                ],
+                "settings": settings_values(),
+            }
+        )
+        storage = SheetStorage(spreadsheet, clock=fixed_clock())
+
+        save_id, _ = storage.save(
+            "新規", [{**make_product(name="新しい商品"), "qty": 2}], dict(SETTING_DEFAULTS)
+        )
+
+        products = spreadsheet.worksheet("products").get_all_values()
+        assert products[0] == list(PRODUCT_HEADERS)
+        assert parse_products(products, "other")[0]["name"] == "他の商品"
+        assert parse_products(products, save_id)[0]["qty"] == 2

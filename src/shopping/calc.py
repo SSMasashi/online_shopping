@@ -31,6 +31,34 @@ def rakuten_rate_from_api(point_rate):
 
 
 # ===========================================================================
+# 商品の基本情報
+# ===========================================================================
+
+
+def quantity(item):
+    """個数。未入力や0以下は1個として扱う。"""
+
+    try:
+        return max(int(float(item.get("qty") or 1)), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def available_stores(item):
+    """買える店（"A": Amazon、"R": 楽天）。価格が0の店は扱いなしとみなす。"""
+
+    return tuple(
+        store for store, price_key in (("A", "ap"), ("R", "rp")) if (item.get(price_key) or 0) > 0
+    )
+
+
+def rakuten_cost(item):
+    """楽天の支払額（税込、個数分）。"""
+
+    return item["rp"] * quantity(item)
+
+
+# ===========================================================================
 # 金額計算
 # ===========================================================================
 
@@ -45,15 +73,14 @@ def tax_excluded_price(price, tax_rate=TAX_RATE):
 
 def amazon_cost(item):
     """
-    Amazonの実質価格を計算。
+    Amazonの支払額（個数分）とポイントを計算。
 
     らくベビ割対象の場合は10%OFF。
-
-    Amazon還元ポイントは、
-    10%OFF後の価格を基準に計算。
+    Amazon還元ポイントは、10%OFF後の価格を基準に計算。
     """
 
-    price = item["ap"] * BABY_DISCOUNT_RATE if item["baby"] else item["ap"]
+    unit_price = item["ap"] * BABY_DISCOUNT_RATE if item["baby"] else item["ap"]
+    price = unit_price * quantity(item)
 
     points = price * (item["apt"] / 100)
 
@@ -68,7 +95,7 @@ def amazon_cost(item):
 def calculate_rakuten_shop_count(items, choices, min_shop_price):
     """
     楽天で購入する商品のうち、
-    買いまわり対象金額以上の商品数を返す。
+    買いまわり対象金額以上（個数分の合計で判定）の商品数を返す。
     """
 
     eligible = 0
@@ -77,7 +104,7 @@ def calculate_rakuten_shop_count(items, choices, min_shop_price):
         if choice != "R":
             continue
 
-        if item["rp"] >= min_shop_price:
+        if rakuten_cost(item) >= min_shop_price:
             eligible += 1
 
     return eligible
@@ -139,9 +166,11 @@ def evaluate(items, choices, max_shops, min_shop_price, bonus_cap, spu_multiplie
         # -------------------------------------------------------------------
 
         else:
-            rakuten_paid += item["rp"]
+            paid = rakuten_cost(item)
 
-            tax_excluded = tax_excluded_price(item["rp"])
+            rakuten_paid += paid
+
+            tax_excluded = tax_excluded_price(paid)
 
             effective_rakuten_rate = item["rpt"] + spu_multiplier
 
@@ -199,10 +228,15 @@ def find_best(items, max_shops, min_shop_price, bonus_cap, spu_multiplier):
     if len(items) > MAX_PRODUCTS:
         raise ValueError(f"商品は最大{MAX_PRODUCTS}個までです（現在{len(items)}個）。")
 
+    options = [available_stores(item) for item in items]
+
+    if not all(options):
+        raise ValueError("Amazonにも楽天にも価格が入力されていない商品があります。")
+
     best = None
     best_choices = None
 
-    for choices in product("AR", repeat=len(items)):
+    for choices in product(*options):
         result = evaluate(items, choices, max_shops, min_shop_price, bonus_cap, spu_multiplier)
 
         if best is None or result["net"] < best["net"]:
@@ -256,7 +290,7 @@ def calculate_item_results(items, choices, best, spu_multiplier):
 
     for item, choice in zip(items, choices):
         if choice == "R":
-            rakuten_tax_excluded_total += tax_excluded_price(item["rp"])
+            rakuten_tax_excluded_total += tax_excluded_price(rakuten_cost(item))
 
     # -----------------------------------------------------------------------
     # 買いまわりポイント
@@ -294,7 +328,10 @@ def calculate_item_results(items, choices, best, spu_multiplier):
             results.append(
                 {
                     "name": name,
+                    "qty": quantity(item),
                     "store": "🟧 Amazon",
+                    "store_code": "A",
+                    "url": str(item.get("aurl", "") or ""),
                     "price": paid,
                     "multiplier": f"{multiplier}倍",
                     "points": total_points,
@@ -307,7 +344,7 @@ def calculate_item_results(items, choices, best, spu_multiplier):
         # ===================================================================
 
         else:
-            paid = float(item["rp"])
+            paid = float(rakuten_cost(item))
 
             tax_excluded = tax_excluded_price(paid)
 
@@ -350,7 +387,10 @@ def calculate_item_results(items, choices, best, spu_multiplier):
             results.append(
                 {
                     "name": name,
+                    "qty": quantity(item),
                     "store": "🟥 楽天",
+                    "store_code": "R",
+                    "url": str(item.get("rurl", "") or ""),
                     "price": paid,
                     "multiplier": detail,
                     "points": total_points,
