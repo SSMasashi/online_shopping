@@ -555,11 +555,9 @@ for i, item in enumerate(items):
 
             else:
                 try:
-                    # 商品ページの取得が必要な場合は10秒以上かかることがある。
-                    with st.spinner("楽天から商品情報を取得しています…"):
-                        price, point_rate = fetch_rakuten_price_and_point(
-                            url, RAKUTEN_APP_ID, RAKUTEN_ACCESS_KEY, RAKUTEN_REFERER
-                        )
+                    price, point_rate = fetch_rakuten_price_and_point(
+                        url, RAKUTEN_APP_ID, RAKUTEN_ACCESS_KEY, RAKUTEN_REFERER
+                    )
 
                     # -------------------------------------------------------
                     # 楽天価格

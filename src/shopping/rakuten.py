@@ -19,14 +19,6 @@ NOT_FOUND_STATUSES = (400, 404)
 
 FALLBACK_HITS = 30
 
-PAGE_USER_AGENT = "Mozilla/5.0 (compatible; buy-sl/1.0)"
-
-# 商品ページは最初の応答まで10秒ほどかかることがあるため、長めに待つ。
-PAGE_TIMEOUT_SECONDS = 25
-
-# 商品ページは大きくても数百KBなので、それ以上は読まない。
-MAX_PAGE_BYTES = 3 * 1024 * 1024
-
 
 class RakutenApiError(RuntimeError):
     """楽天APIの呼び出しに失敗したときの例外。status は HTTP ステータス（接続エラーなどは None）。"""
@@ -85,40 +77,6 @@ def _is_same_item(item, shop, slug):
     return (item_shop.lower(), item_slug.lower()) == (shop.lower(), slug.lower())
 
 
-def extract_item_id(html, slug):
-    """
-    商品ページのHTMLから、楽天の内部番号（itemId）を取り出す。見つからなければ None。
-
-    URLの商品管理番号（slug）は itemCode に使えないことがあるため、
-    ページ内の商品情報から itemCode 用の内部番号を探す。
-    """
-
-    slug = slug.lower()
-    has_sku_info = False
-
-    # manageNumber（URLの商品管理番号）と itemId が同じオブジェクトにあるものを優先する。
-    for obj in re.finditer(r"\{[^{}]*\}", html):
-        text = obj.group(0)
-        manage = re.search(r'"manageNumber"\s*:\s*"([^"]*)"', text)
-        item_id = re.search(r'"itemId"\s*:\s*"?(\d+)', text)
-
-        if manage and item_id:
-            has_sku_info = True
-
-            if manage.group(1).lower() == slug:
-                return item_id.group(1)
-
-    # 商品情報はあるが URL と一致しないなら、別の商品の番号を使わないよう諦める。
-    if has_sku_info:
-        return None
-
-    ids = set(re.findall(r'"itemId"\s*:\s*"?(\d+)', html)) | set(
-        re.findall(r"\bitem_id=(\d+)", html)
-    )
-
-    return ids.pop() if len(ids) == 1 else None
-
-
 # ===========================================================================
 # API呼び出し
 # ===========================================================================
@@ -161,72 +119,17 @@ def call_rakuten_api(params, app_id, access_key, referer):
         raise RakutenApiError("楽天APIの応答を読み取れませんでした") from None
 
 
-def fetch_item_page(url):
-    """楽天の商品ページのHTMLを取得する。"""
-
-    req = urllib.request.Request(
-        url, headers={"User-Agent": PAGE_USER_AGENT, "Accept-Language": "ja"}
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=PAGE_TIMEOUT_SECONDS) as res:
-            raw = res.read(MAX_PAGE_BYTES)
-            charset = res.headers.get_content_charset()
-
-    except (urllib.error.URLError, TimeoutError) as e:
-        raise RakutenApiError(f"商品ページを取得できませんでした（{e}）") from None
-
-    if not charset:
-        meta = re.search(rb"charset=[\"']?([A-Za-z0-9_-]+)", raw[:4096])
-        charset = meta.group(1).decode("ascii") if meta else "utf-8"
-
-    try:
-        return raw.decode(charset, errors="replace")
-    except LookupError:
-        return raw.decode("utf-8", errors="replace")
-
-
 NOT_FOUND_MESSAGE = "URLの商品と一致する商品が見つかりませんでした"
 
 
-def _fetch_via_item_page(shop, slug, app_id, access_key, referer, call_api, fetch_page):
-    """商品ページから内部番号を読み取り、その itemCode で API から取得する。取れなければ None。"""
-
-    try:
-        html = fetch_page(f"https://{RAKUTEN_ITEM_HOST}/{shop}/{slug}/")
-        item_id = extract_item_id(html, slug)
-
-        if item_id is None:
-            return None
-
-        data = call_api({"itemCode": f"{shop}:{item_id}"}, app_id, access_key, referer)
-
-    except RakutenApiError:
-        return None
-
-    for entry in data.get("Items", []):
-        item = entry.get("Item", {})
-
-        if _is_same_item(item, shop, slug):
-            return parse_item(item)
-
-    return None
-
-
-def fetch_rakuten_price_and_point(
-    url, app_id, access_key, referer, call_api=call_rakuten_api, fetch_page=None
-):
+def fetch_rakuten_price_and_point(url, app_id, access_key, referer, call_api=call_rakuten_api):
     """
     楽天の商品URLから (税込価格, pointRate) を取得する。
 
     pointRate は API の生の値（通常の1%を含む）。
-    URLの itemCode で見つからない場合は、
-        1. 商品ページから内部番号を読み取って itemCode を作り直す
-        2. ショップ内をキーワード検索する
-    の順に試し、URLと同じ商品が見つかったときだけ採用する。
+    itemCode で見つからない場合はショップ内をキーワード検索し、
+    URLと同じ商品が見つかったときだけ採用する。
     """
-
-    fetch_page = fetch_page or fetch_item_page
 
     app_id = (app_id or "").strip()
     access_key = (access_key or "").strip()
@@ -254,15 +157,6 @@ def fetch_rakuten_price_and_point(
     except RakutenApiError as e:
         if e.status not in NOT_FOUND_STATUSES:
             raise
-
-    # -----------------------------------------------------------------------
-    # 商品ページの内部番号で itemCode を作り直す
-    # -----------------------------------------------------------------------
-
-    result = _fetch_via_item_page(shop, slug, app_id, access_key, referer, call_api, fetch_page)
-
-    if result is not None:
-        return result
 
     # -----------------------------------------------------------------------
     # ショップ内をキーワード検索し、同じ商品だけを採用する
