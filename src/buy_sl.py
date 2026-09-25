@@ -18,12 +18,7 @@ Streamlit Cloud の Secrets に以下を設定:
 ※保存JSONにも楽天APIの認証情報は保存されません。
 """
 
-import json
 import os
-import re
-import urllib.error
-import urllib.parse
-import urllib.request
 
 import gspread
 import streamlit as st
@@ -36,6 +31,7 @@ from shopping.calc import (
     find_best,
     rakuten_rate_from_api,
 )
+from shopping.rakuten import fetch_rakuten_price_and_point
 
 # ===========================================================================
 # Streamlit設定
@@ -84,9 +80,6 @@ RAKUTEN_APP_ID = get_secret_or_env("RAKUTEN_APP_ID")
 RAKUTEN_ACCESS_KEY = get_secret_or_env("RAKUTEN_ACCESS_KEY")
 
 RAKUTEN_REFERER = get_secret_or_env("RAKUTEN_REFERER")
-
-
-RAKUTEN_API_URL = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20260701"
 
 
 # ===========================================================================
@@ -620,140 +613,6 @@ def get_saved_data_options():
 
 
 # ===========================================================================
-# 楽天API
-# ===========================================================================
-
-
-def extract_shop_and_slug(url: str):
-    """
-    楽天商品URLからショップコードと商品コード部分を取得する。
-    """
-
-    path = urllib.parse.urlparse(url).path.strip("/")
-
-    parts = [p for p in path.split("/") if p]
-
-    if len(parts) < 2:
-        raise ValueError("楽天の商品URLとして認識できません")
-
-    return parts[0], parts[1]
-
-
-def _call_rakuten_api(params, app_id, access_key, referer):
-    """
-    楽天APIを呼び出す。
-    """
-
-    params = {**params, "format": "json", "applicationId": app_id, "accessKey": access_key}
-
-    req = urllib.request.Request(
-        f"{RAKUTEN_API_URL}?{urllib.parse.urlencode(params)}", headers={"Origin": referer}
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=10) as res:
-            return json.loads(res.read().decode("utf-8"))
-
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="ignore")
-
-        try:
-            err = json.loads(body)
-
-            errs = err.get("errors", err)
-
-            msg = (
-                errs.get("errorMessage")
-                or errs.get("error_description")
-                or errs.get("error")
-                or body
-            )
-
-        except json.JSONDecodeError:
-            msg = body
-
-        raise RuntimeError(str(msg)) from None
-
-
-def fetch_rakuten_price_and_point(url: str):
-    """
-    楽天の商品URLから価格とポイント還元率を取得する。
-
-    楽天APIの認証情報はStreamlit Secretsから取得する。
-    アプリ画面からは入力・編集できない。
-
-    戻り値:
-        price
-        point_rate
-
-    ※ここでは楽天APIから取得した生の還元率を返す。
-    """
-
-    app_id = (RAKUTEN_APP_ID or "").strip()
-
-    access_key = (RAKUTEN_ACCESS_KEY or "").strip()
-
-    referer = (RAKUTEN_REFERER or "").strip()
-
-    if not app_id or not access_key:
-        raise RuntimeError("楽天APIの認証情報がStreamlit Secretsに設定されていません。")
-
-    if not referer:
-        raise RuntimeError("楽天APIのRAKUTEN_REFERERがStreamlit Secretsに設定されていません。")
-
-    shop_code, slug = extract_shop_and_slug(url)
-
-    item_code = f"{shop_code}:{slug}"
-
-    # -----------------------------------------------------------------------
-    # itemCodeで直接取得
-    # -----------------------------------------------------------------------
-
-    try:
-        data = _call_rakuten_api({"itemCode": item_code}, app_id, access_key, referer)
-
-        items = data.get("Items", [])
-
-        if items:
-            item = items[0]["Item"]
-
-            return (float(item["itemPrice"]), int(float(item.get("pointRate", 1))))
-
-    except RuntimeError:
-        pass
-
-    # -----------------------------------------------------------------------
-    # フォールバック
-    # -----------------------------------------------------------------------
-
-    keyword_match = re.sub(r"[^0-9A-Za-z]+", " ", slug).split()
-
-    keyword = keyword_match[0] if keyword_match else ""
-
-    if len(keyword) < 2:
-        raise ValueError(f"商品が見つかりませんでした（itemCode: {item_code}）")
-
-    try:
-        data = _call_rakuten_api(
-            {"shopCode": shop_code, "keyword": keyword, "hits": 1}, app_id, access_key, referer
-        )
-
-    except RuntimeError as e:
-        raise RuntimeError(f"楽天APIエラー（{item_code}）: {e}") from None
-
-    items = data.get("Items", [])
-
-    if not items:
-        raise ValueError(
-            f"商品が見つかりませんでした（itemCode: {item_code} / keyword: {keyword}）"
-        )
-
-    item = items[0]["Item"]
-
-    return (float(item["itemPrice"]), int(float(item.get("pointRate", 1))))
-
-
-# ===========================================================================
 # 表示用関数
 # ===========================================================================
 
@@ -1087,7 +946,9 @@ for i, item in enumerate(items):
 
             else:
                 try:
-                    price, point_rate = fetch_rakuten_price_and_point(url)
+                    price, point_rate = fetch_rakuten_price_and_point(
+                        url, RAKUTEN_APP_ID, RAKUTEN_ACCESS_KEY, RAKUTEN_REFERER
+                    )
 
                     # -------------------------------------------------------
                     # 楽天価格
