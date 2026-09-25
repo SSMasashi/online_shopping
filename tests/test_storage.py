@@ -15,8 +15,8 @@ Google Sheets への保存・読み込み・削除を、実際のGoogle Sheets�
 
 import datetime
 
-import gspread
 import pytest
+from fakes import FakeSpreadsheet, FakeWorksheet
 
 from shopping.calc import MAX_PRODUCTS
 from shopping.storage import (
@@ -38,115 +38,14 @@ from shopping.storage import (
     safe_int,
 )
 
-
-# ===========================================================================
-# テスト用フェイク
-# ===========================================================================
-
-
-class FakeWorksheet:
-    """
-    gspreadのWorksheetを模したフェイク。
-
-    title と2次元リストの値を持ち、get_all_values / update / resize /
-    row_count / col_count / clear を、実際のAPI通信なしに再現する。
-    """
-
-    def __init__(self, title, values=None, rows=100, cols=20, call_log=None, fail_on_update=False):
-        self.title = title
-        self.values = [list(row) for row in (values or [])]
-        self._row_count = rows
-        self._col_count = cols
-        self.call_log = call_log
-        self.fail_on_update = fail_on_update
-        self.update_calls = []
-        self.clear_calls = 0
-
-    def get_all_values(self, **kwargs):
-        return [list(row) for row in self.values]
-
-    @property
-    def row_count(self):
-        return self._row_count
-
-    @property
-    def col_count(self):
-        return self._col_count
-
-    def resize(self, rows=None, cols=None):
-        if rows is not None:
-            self._row_count = rows
-        if cols is not None:
-            self._col_count = cols
-
-    def update(self, values=None, range_name=None, value_input_option=None, **kwargs):
-        if range_name not in (None, "A1"):
-            raise AssertionError(f"range_nameはA1で呼ばれる想定です(実際: {range_name!r})")
-
-        self.update_calls.append(
-            {
-                "values": [list(row) for row in values],
-                "range_name": range_name,
-                "value_input_option": value_input_option,
-            }
-        )
-
-        if self.call_log is not None:
-            self.call_log.append(self.title)
-
-        if self.fail_on_update:
-            raise RuntimeError(f"{self.title}のupdateに失敗しました（テスト用）")
-
-        self.values = [list(row) for row in values]
-
-        if len(self.values) > self._row_count:
-            self._row_count = len(self.values)
-
-        max_cols = max((len(row) for row in self.values), default=0)
-        if max_cols > self._col_count:
-            self._col_count = max_cols
-
-    def clear(self):
-        # 呼ばれたことだけ記録する。呼ばれていないことをテストで確認するため。
-        self.clear_calls += 1
-
-
-class FakeSpreadsheet:
-    """
-    gspreadのSpreadsheetを模したフェイク。
-
-    title -> FakeWorksheet の辞書を持ち、worksheet / add_worksheet を再現する。
-    全シート共通の call_log に update 呼び出し順（シート名）を記録するため、
-    複数シートへの書き込み順序をテストできる。
-    """
-
-    def __init__(self, worksheets=None):
-        self.call_log = []
-        self.sheets = {}
-        self.add_worksheet_calls = []
-
-        for title, values in (worksheets or {}).items():
-            self.sheets[title] = FakeWorksheet(title, values=values, call_log=self.call_log)
-
-    def worksheet(self, title):
-        if title not in self.sheets:
-            raise gspread.WorksheetNotFound(title)
-
-        return self.sheets[title]
-
-    def add_worksheet(self, title, rows, cols):
-        ws = FakeWorksheet(title, values=[], rows=rows, cols=cols, call_log=self.call_log)
-        self.sheets[title] = ws
-        self.add_worksheet_calls.append(title)
-        return ws
-
-
 # ===========================================================================
 # テスト用ヘルパー
 # ===========================================================================
 
 
-def make_product(name="商品", ap=1000, apt=1, baby=False, rp=1000, rpt=1, rurl="https://example.com"):
+def make_product(
+    name="商品", ap=1000, apt=1, baby=False, rp=1000, rpt=1, rurl="https://example.com"
+):
     """save() に渡す商品dictを作るヘルパー（save_idは含まない）。"""
 
     return {"name": name, "ap": ap, "apt": apt, "baby": baby, "rp": rp, "rpt": rpt, "rurl": rurl}
@@ -204,12 +103,12 @@ class TestSafeInt:
         assert safe_int(None) == 0
 
     def test_小数の文字列は切り捨てて整数になる(self):
-        """"3.7" は int(float("3.7")) の仕様どおり3になる。"""
+        """ "3.7" は int(float("3.7")) の仕様どおり3になる。"""
 
         assert safe_int("3.7") == 3
 
     def test_通常の整数文字列を変換できる(self):
-        """"5" のような通常の整数文字列は5に変換される。"""
+        """ "5" のような通常の整数文字列は5に変換される。"""
 
         assert safe_int("5") == 5
 
@@ -219,7 +118,7 @@ class TestSafeInt:
         assert safe_int(5) == 5
 
     def test_変換できない文字列はdefaultになる(self):
-        """"abc" のような変換不能な文字列はdefaultになる。"""
+        """ "abc" のような変換不能な文字列はdefaultになる。"""
 
         assert safe_int("abc", default=9) == 9
 
@@ -240,7 +139,7 @@ class TestNormalizeBool:
 
     @pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "YES", "on", "On", " true "])
     def test_真として扱う文字列(self, value):
-        """"true","1","yes","on"（大文字小文字・前後空白を無視）はTrueになる。"""
+        """ "true","1","yes","on"（大文字小文字・前後空白を無視）はTrueになる。"""
 
         assert normalize_bool(value) is True
 
@@ -299,10 +198,7 @@ class TestParseSavedData:
     def test_列の順番が違っても見出し名で読み取れる(self):
         """見出しの列順が異なっていても、列名を頼りに正しく読み取れる。"""
 
-        values = [
-            ["name", "save_id", "saved_at"],
-            ["名前1", "id1", "2024-01-01 00:00:00"],
-        ]
+        values = [["name", "save_id", "saved_at"], ["名前1", "id1", "2024-01-01 00:00:00"]]
         assert parse_saved_data(values) == [
             {"save_id": "id1", "name": "名前1", "saved_at": "2024-01-01 00:00:00"}
         ]
@@ -422,7 +318,7 @@ class TestParseProducts:
         assert parse_products(values, "id1") == []
 
     def test_babyの正規化が反映される(self):
-        """"TRUE" や "0" のような値もnormalize_boolを通してbool化される。"""
+        """ "TRUE" や "0" のような値もnormalize_boolを通してbool化される。"""
 
         values = products_values(
             ["id1", "商品1", "1000", "1", "TRUE", "1000", "1", ""],
@@ -452,9 +348,7 @@ class TestParseSettings:
         """一致するsave_id・既知のキーの行だけが値を上書きする。"""
 
         values = settings_values(
-            ["id1", "max_shops", "3"],
-            ["id1", "bonus_cap", "5000"],
-            ["id2", "max_shops", "99"],
+            ["id1", "max_shops", "3"], ["id1", "bonus_cap", "5000"], ["id2", "max_shops", "99"]
         )
         result = parse_settings(values, "id1")
 
@@ -558,10 +452,7 @@ class TestReplaceRows:
     def test_save_idが元に無い場合は末尾に追加される(self):
         """一致するsave_idの行が無ければ、新規行は末尾に追加される。"""
 
-        values = [
-            list(SAVED_DATA_HEADERS),
-            ["id1", "名前1", "2024-01-01 00:00:00"],
-        ]
+        values = [list(SAVED_DATA_HEADERS), ["id1", "名前1", "2024-01-01 00:00:00"]]
         new_rows = [["id-new", "新規", "2024-03-01 00:00:00"]]
 
         result = replace_rows(values, SAVED_DATA_HEADERS, "id-new", new_rows)
@@ -631,20 +522,14 @@ class TestReplaceRows:
     def test_見出しの列順が違うとValueError(self):
         """列の順番が違う見出しは、書き込みでは完全一致とみなされずValueErrorになる。"""
 
-        values = [
-            ["name", "save_id", "saved_at"],
-            ["名前1", "id1", "2024-01-01 00:00:00"],
-        ]
+        values = [["name", "save_id", "saved_at"], ["名前1", "id1", "2024-01-01 00:00:00"]]
         with pytest.raises(ValueError):
             replace_rows(values, SAVED_DATA_HEADERS, "id1", [])
 
     def test_見出しの末尾に空セルがあっても一致とみなされる(self):
         """見出し行の末尾の空セルは無視して比較されるため、ValueErrorにならない。"""
 
-        values = [
-            list(SAVED_DATA_HEADERS) + ["", ""],
-            ["id1", "名前1", "2024-01-01 00:00:00"],
-        ]
+        values = [list(SAVED_DATA_HEADERS) + ["", ""], ["id1", "名前1", "2024-01-01 00:00:00"]]
         new_rows = [["id1", "新名前1", "2024-02-01 00:00:00"]]
 
         result = replace_rows(values, SAVED_DATA_HEADERS, "id1", new_rows)
@@ -698,7 +583,9 @@ class TestSheetStorageSave:
 
         spreadsheet = FakeSpreadsheet(
             {
-                SAVED_DATA_SHEET: saved_data_values(["other-id", "他の保存", "2024-01-01 00:00:00"]),
+                SAVED_DATA_SHEET: saved_data_values(
+                    ["other-id", "他の保存", "2024-01-01 00:00:00"]
+                ),
                 PRODUCTS_SHEET: products_values(
                     ["other-id", "他の商品", "1000", "1", "False", "1000", "1", "https://other"]
                 ),
@@ -780,7 +667,9 @@ class TestSheetStorageSave:
         """
 
         original_saved_data = saved_data_values(["id1", "既存", "2024-01-01 00:00:00"])
-        spreadsheet = FakeSpreadsheet({SAVED_DATA_SHEET: [list(row) for row in original_saved_data]})
+        spreadsheet = FakeSpreadsheet(
+            {SAVED_DATA_SHEET: [list(row) for row in original_saved_data]}
+        )
         spreadsheet.sheets[PRODUCTS_SHEET] = FakeWorksheet(
             PRODUCTS_SHEET, values=[], call_log=spreadsheet.call_log, fail_on_update=True
         )
@@ -861,7 +750,9 @@ class TestSheetStorageSave:
         storage = SheetStorage(spreadsheet, clock=fixed_clock())
 
         with pytest.raises(ValueError):
-            storage.save("あ" * (MAX_SAVE_NAME_LENGTH + 1), [make_product()], dict(SETTING_DEFAULTS))
+            storage.save(
+                "あ" * (MAX_SAVE_NAME_LENGTH + 1), [make_product()], dict(SETTING_DEFAULTS)
+            )
 
         assert spreadsheet.call_log == []
 
@@ -1066,8 +957,7 @@ class TestSheetStorageDelete:
         spreadsheet = FakeSpreadsheet(
             {
                 SAVED_DATA_SHEET: saved_data_values(
-                    ["id1", "保存1", "2024-01-01 00:00:00"],
-                    ["id2", "保存2", "2024-01-02 00:00:00"],
+                    ["id1", "保存1", "2024-01-01 00:00:00"], ["id2", "保存2", "2024-01-02 00:00:00"]
                 ),
                 PRODUCTS_SHEET: products_values(
                     ["id1", "商品1", "1000", "1", "False", "1000", "1", ""],
@@ -1089,9 +979,10 @@ class TestSheetStorageDelete:
         assert len(parse_products(products_values_after, "id2")) == 1
 
         settings_values_after = spreadsheet.sheets[SETTINGS_SHEET].get_all_values()
-        assert parse_settings(settings_values_after, "id2")["max_shops"] == SETTING_DEFAULTS[
-            "max_shops"
-        ]
+        assert (
+            parse_settings(settings_values_after, "id2")["max_shops"]
+            == SETTING_DEFAULTS["max_shops"]
+        )
 
     def test_削除の書き込み順序はsaved_data_products_settings(self):
         """一覧を先に消すため、updateの順序はsaved_data -> products -> settingsになる。"""
