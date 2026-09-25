@@ -6,6 +6,24 @@ Streamlit に依存しない純粋な計算関数だけを置く。
 
 from itertools import product
 
+# 組み合わせ探索は 2^n 通りになるため、商品数に上限を設ける。
+MAX_PRODUCTS = 15
+
+
+# ===========================================================================
+# 楽天還元率
+# ===========================================================================
+
+
+def rakuten_rate_from_api(point_rate):
+    """
+    楽天APIの pointRate（通常ポイント1%を含む倍率）を、
+    アプリで扱う還元率（通常の1%を含まない）に変換する。
+    """
+
+    return max(int(point_rate) - 1, 0)
+
+
 # ===========================================================================
 # 金額計算
 # ===========================================================================
@@ -172,6 +190,9 @@ def find_best(items, max_shops, min_shop_price, bonus_cap, spu_multiplier):
     実質負担額が最も安い組み合わせを探す。
     """
 
+    if len(items) > MAX_PRODUCTS:
+        raise ValueError(f"商品は最大{MAX_PRODUCTS}個までです（現在{len(items)}個）。")
+
     best = None
     best_choices = None
 
@@ -190,7 +211,13 @@ def find_best(items, max_shops, min_shop_price, bonus_cap, spu_multiplier):
 # ===========================================================================
 
 
-def calculate_item_results(items, choices, best, spu_multiplier, min_shop_price):
+def _format_rate(rate):
+    """倍率を小数第1位までの文字列にする（整数なら小数点なし）。"""
+
+    return f"{round(rate, 1):g}"
+
+
+def calculate_item_results(items, choices, best, spu_multiplier):
     """
     商品ごとの
 
@@ -230,6 +257,13 @@ def calculate_item_results(items, choices, best, spu_multiplier, min_shop_price)
     # -----------------------------------------------------------------------
 
     total_rakuten_bonus = float(best["bonus"])
+
+    # 配分した買いまわりポイントを税抜価格あたりの倍率に直したもの。
+    # 上限で頭打ちになると bonus_multiplier より小さくなる。
+    buyaround_rate = 0.0
+
+    if rakuten_tax_excluded_total > 0:
+        buyaround_rate = total_rakuten_bonus / rakuten_tax_excluded_total * 100
 
     # -----------------------------------------------------------------------
     # 商品ごとの計算
@@ -298,21 +332,13 @@ def calculate_item_results(items, choices, best, spu_multiplier, min_shop_price)
 
             net = paid - total_points
 
-            eligible = paid >= min_shop_price
-
-            buyaround_rate = best["bonus_multiplier"] if eligible else 0
-
             total_multiplier = product_rate + spu_rate + buyaround_rate
 
             detail = (
-                f"{round(total_multiplier)}倍"
-                f"("
-                f"{round(product_rate)}"
-                f"+"
-                f"{round(spu_rate)}"
-                f"+"
-                f"{round(buyaround_rate)}"
-                f")"
+                f"{_format_rate(total_multiplier)}倍"
+                f"({_format_rate(product_rate)}"
+                f"+{_format_rate(spu_rate)}"
+                f"+{_format_rate(buyaround_rate)})"
             )
 
             results.append(

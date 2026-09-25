@@ -1,20 +1,22 @@
 """
-src/shopping/calc.py の特性テスト（characterization test）。
+src/shopping/calc.py のテスト。
 
-リファクタリング前に「今の振る舞い」を固定するためのテスト。
-実装を正として、仕様書の記述と実装が食い違う箇所も
-テストとして固定した上でコメントに明記する。
+リファクタリングで計算結果が変わらないよう、現在の仕様を固定する。
+既知の仕様（買いまわりを商品単位で数える、楽天還元率は通常の1%を含まない）も
+テストとして明示している。
 """
 
 import pytest
 
 from shopping.calc import (
+    MAX_PRODUCTS,
     amazon_cost,
     calculate_item_results,
     calculate_rakuten_bonus,
     calculate_rakuten_shop_count,
     evaluate,
     find_best,
+    rakuten_rate_from_api,
     tax_excluded_price,
 )
 
@@ -22,15 +24,7 @@ from shopping.calc import (
 def make_item(name="商品", ap=1000, apt=1, baby=False, rp=1000, rpt=1, rurl="https://example.com"):
     """テスト用の商品dictを作るヘルパー。"""
 
-    return {
-        "name": name,
-        "ap": ap,
-        "apt": apt,
-        "baby": baby,
-        "rp": rp,
-        "rpt": rpt,
-        "rurl": rurl,
-    }
+    return {"name": name, "ap": ap, "apt": apt, "baby": baby, "rp": rp, "rpt": rpt, "rurl": rurl}
 
 
 # ===========================================================================
@@ -180,10 +174,7 @@ class TestCalculateRakutenBonus:
         """税込11000円・3ショップ・上限5・上限額1000円のとき、期待通りのボーナスになる。"""
 
         result = calculate_rakuten_bonus(
-            rakuten_tax_included_total=11000,
-            eligible_shops=3,
-            max_shops=5,
-            bonus_cap=1000,
+            rakuten_tax_included_total=11000, eligible_shops=3, max_shops=5, bonus_cap=1000
         )
         # shop_count=3, multiplier=2, tax_excluded=10000, bonus=10000*2/100=200
         assert result["shop_count"] == 3
@@ -195,10 +186,7 @@ class TestCalculateRakutenBonus:
         """境界値: eligible_shops=0のとき、倍率が負にならず0に丸められボーナスも0。"""
 
         result = calculate_rakuten_bonus(
-            rakuten_tax_included_total=5000,
-            eligible_shops=0,
-            max_shops=5,
-            bonus_cap=1000,
+            rakuten_tax_included_total=5000, eligible_shops=0, max_shops=5, bonus_cap=1000
         )
         assert result["shop_count"] == 0
         assert result["bonus_multiplier"] == 0
@@ -208,10 +196,7 @@ class TestCalculateRakutenBonus:
         """境界値: eligible_shopsがmax_shopsより多くても、倍率計算はmax_shops基準。"""
 
         result = calculate_rakuten_bonus(
-            rakuten_tax_included_total=11000,
-            eligible_shops=10,
-            max_shops=3,
-            bonus_cap=10000,
+            rakuten_tax_included_total=11000, eligible_shops=10, max_shops=3, bonus_cap=10000
         )
         assert result["shop_count"] == 3
         assert result["bonus_multiplier"] == 2
@@ -221,10 +206,7 @@ class TestCalculateRakutenBonus:
 
         # tax_excluded_total=10000, multiplier=4 -> bonus=400 = bonus_cap
         result = calculate_rakuten_bonus(
-            rakuten_tax_included_total=11000,
-            eligible_shops=5,
-            max_shops=5,
-            bonus_cap=400,
+            rakuten_tax_included_total=11000, eligible_shops=5, max_shops=5, bonus_cap=400
         )
         assert result["bonus_multiplier"] == 4
         assert result["bonus"] == pytest.approx(400.0)
@@ -234,10 +216,7 @@ class TestCalculateRakutenBonus:
 
         # 上と同条件でbonus_capだけ100に下げると400ではなく100になる
         result = calculate_rakuten_bonus(
-            rakuten_tax_included_total=11000,
-            eligible_shops=5,
-            max_shops=5,
-            bonus_cap=100,
+            rakuten_tax_included_total=11000, eligible_shops=5, max_shops=5, bonus_cap=100
         )
         assert result["bonus_multiplier"] == 4
         assert result["bonus"] == pytest.approx(100.0)
@@ -246,10 +225,7 @@ class TestCalculateRakutenBonus:
         """境界値: 楽天での購入が0円（購入なし）のときボーナスも0円。"""
 
         result = calculate_rakuten_bonus(
-            rakuten_tax_included_total=0,
-            eligible_shops=0,
-            max_shops=5,
-            bonus_cap=1000,
+            rakuten_tax_included_total=0, eligible_shops=0, max_shops=5, bonus_cap=1000
         )
         assert result["bonus"] == pytest.approx(0.0)
 
@@ -335,9 +311,15 @@ class TestEvaluate:
         item = make_item(ap=2200, apt=0, baby=False, rp=2000, rpt=1)
         items = [item, item]
 
-        result_aa = evaluate(items, ("A", "A"), max_shops=2, min_shop_price=1000, bonus_cap=10000, spu_multiplier=0)
-        result_ar = evaluate(items, ("A", "R"), max_shops=2, min_shop_price=1000, bonus_cap=10000, spu_multiplier=0)
-        result_rr = evaluate(items, ("R", "R"), max_shops=2, min_shop_price=1000, bonus_cap=10000, spu_multiplier=0)
+        result_aa = evaluate(
+            items, ("A", "A"), max_shops=2, min_shop_price=1000, bonus_cap=10000, spu_multiplier=0
+        )
+        result_ar = evaluate(
+            items, ("A", "R"), max_shops=2, min_shop_price=1000, bonus_cap=10000, spu_multiplier=0
+        )
+        result_rr = evaluate(
+            items, ("R", "R"), max_shops=2, min_shop_price=1000, bonus_cap=10000, spu_multiplier=0
+        )
 
         assert result_aa["net"] == pytest.approx(4400.0)
         assert result_ar["net"] == pytest.approx(4181.818181818182)
@@ -348,7 +330,9 @@ class TestEvaluate:
     def test_商品が0件の場合は支払いもポイントも0(self):
         """境界値: 商品が1件もない場合、支払額・ポイント・netすべて0になる。"""
 
-        result = evaluate([], (), max_shops=5, min_shop_price=1000, bonus_cap=1000, spu_multiplier=0)
+        result = evaluate(
+            [], (), max_shops=5, min_shop_price=1000, bonus_cap=1000, spu_multiplier=0
+        )
         assert result["net"] == pytest.approx(0.0)
         assert result["total_points"] == pytest.approx(0.0)
         assert result["amazon_paid"] == pytest.approx(0.0)
@@ -379,7 +363,12 @@ class TestEvaluate:
             [item_baby], ("A",), max_shops=5, min_shop_price=1000, bonus_cap=1000, spu_multiplier=0
         )
         result_normal = evaluate(
-            [item_normal], ("A",), max_shops=5, min_shop_price=1000, bonus_cap=1000, spu_multiplier=0
+            [item_normal],
+            ("A",),
+            max_shops=5,
+            min_shop_price=1000,
+            bonus_cap=1000,
+            spu_multiplier=0,
         )
 
         assert result_baby["net"] == pytest.approx(855.0)  # 900 - 45
@@ -447,7 +436,9 @@ class TestFindBest:
     def test_商品が0件の場合は空の組み合わせが返る(self):
         """境界値: 商品が0件の場合、選択肢は空タプルでnetは0になる。"""
 
-        choices, best = find_best([], max_shops=5, min_shop_price=1000, bonus_cap=1000, spu_multiplier=0)
+        choices, best = find_best(
+            [], max_shops=5, min_shop_price=1000, bonus_cap=1000, spu_multiplier=0
+        )
         assert choices == ()
         assert best["net"] == pytest.approx(0.0)
 
@@ -475,21 +466,17 @@ class TestCalculateItemResults:
         best = evaluate(
             items, choices, max_shops=3, min_shop_price=1500, bonus_cap=10000, spu_multiplier=0
         )
-        results = calculate_item_results(
-            items, choices, best, spu_multiplier=0, min_shop_price=1500
-        )
+        results = calculate_item_results(items, choices, best, spu_multiplier=0)
 
         total_points_from_items = sum(r["points"] for r in results)
         assert total_points_from_items == pytest.approx(best["total_points"])
         # 手計算: base=18.1818+18.1818+9.0909, bonus=45.4545 -> 合計90.9090909...
         assert best["total_points"] == pytest.approx(90.9090909090909)
 
-    def test_買いまわり対象外の商品でも配分は税抜価格比例で受け取るが倍率表示には反映されない(self):
+    def test_買いまわり対象外の商品も配分された買いまわり倍率が表示に反映される(self):
         """
-        既知の仕様(バグらしき点): 買いまわりボーナスの配分は
-        min_shop_price判定に関係なく全楽天商品の税抜価格比で配分されるが、
-        倍率の表示文字列はmin_shop_price未満の商品には買いまわり倍率を加算しない。
-        そのため表示上の倍率と実際の受取ポイントに乖離が生じる。
+        買いまわりボーナスは全楽天商品の税抜価格比で配分されるので、
+        min_shop_price未満の商品も、配分を受けた分の倍率を表示する。
         """
 
         item1 = make_item(name="商品1", rp=2000, rpt=1)
@@ -501,20 +488,34 @@ class TestCalculateItemResults:
         best = evaluate(
             items, choices, max_shops=3, min_shop_price=1500, bonus_cap=10000, spu_multiplier=0
         )
-        results = calculate_item_results(
-            items, choices, best, spu_multiplier=0, min_shop_price=1500
+        results = calculate_item_results(items, choices, best, spu_multiplier=0)
+
+        # 対象外の商品も配分(約9.0909pt)を受け取り、表示にも+1倍が出る
+        assert results[2]["multiplier"] == "2倍(1+0+1)"
+        assert results[2]["points"] == pytest.approx(18.18181818181818)
+
+        assert results[0]["multiplier"] == "2倍(1+0+1)"
+        assert results[0]["points"] == pytest.approx(36.36363636363636)
+
+    def test_ボーナスが上限で頭打ちのときは実際の配分倍率を小数で表示する(self):
+        """
+        2商品(税抜各2000円)で倍率1、本来のボーナス40ptが上限20ptで頭打ち。
+        実際の買いまわり倍率は 20 / 4000 * 100 = 0.5倍 になる。
+        """
+
+        items = [make_item(name="商品1", rp=2200, rpt=1), make_item(name="商品2", rp=2200, rpt=1)]
+        choices = ("R", "R")
+
+        best = evaluate(
+            items, choices, max_shops=10, min_shop_price=1000, bonus_cap=20, spu_multiplier=0
         )
+        results = calculate_item_results(items, choices, best, spu_multiplier=0)
 
-        item3_result = results[2]
-        # 倍率表示は買いまわり対象外として "+0" のまま
-        assert item3_result["multiplier"] == "1倍(1+0+0)"
-        # しかし実際に受け取るポイントには買いまわり配分(約9.0909円)が上乗せされている
-        assert item3_result["points"] == pytest.approx(18.18181818181818)
-
-        item1_result = results[0]
-        # 買いまわり対象の商品は表示にも倍率2(1+0+1)が反映される
-        assert item1_result["multiplier"] == "2倍(1+0+1)"
-        assert item1_result["points"] == pytest.approx(36.36363636363636)
+        assert best["bonus"] == pytest.approx(20.0)
+        for r in results:
+            # 税抜2000円 * 1% = 20pt + 配分10pt
+            assert r["points"] == pytest.approx(30.0)
+            assert r["multiplier"] == "1.5倍(1+0+0.5)"
 
     def test_Amazon商品の倍率表示は還元率をそのまま整数化した文字列になる(self):
         """Amazon商品の倍率表示は int(apt) を使った "n倍" 形式になる。"""
@@ -523,8 +524,10 @@ class TestCalculateItemResults:
         items = [item]
         choices = ("A",)
 
-        best = evaluate(items, choices, max_shops=5, min_shop_price=1000, bonus_cap=1000, spu_multiplier=0)
-        results = calculate_item_results(items, choices, best, spu_multiplier=0, min_shop_price=1000)
+        best = evaluate(
+            items, choices, max_shops=5, min_shop_price=1000, bonus_cap=1000, spu_multiplier=0
+        )
+        results = calculate_item_results(items, choices, best, spu_multiplier=0)
 
         assert results[0]["multiplier"] == "5倍"
         assert results[0]["store"] == "🟧 Amazon"
@@ -539,8 +542,10 @@ class TestCalculateItemResults:
         items = [item]
         choices = ("A",)
 
-        best = evaluate(items, choices, max_shops=5, min_shop_price=1000, bonus_cap=1000, spu_multiplier=0)
-        results = calculate_item_results(items, choices, best, spu_multiplier=0, min_shop_price=1000)
+        best = evaluate(
+            items, choices, max_shops=5, min_shop_price=1000, bonus_cap=1000, spu_multiplier=0
+        )
+        results = calculate_item_results(items, choices, best, spu_multiplier=0)
 
         assert results[0]["name"] == "(無題)"
 
@@ -554,7 +559,7 @@ class TestCalculateItemResults:
         best = evaluate(
             items, choices, max_shops=5, min_shop_price=999999, bonus_cap=1000, spu_multiplier=0
         )
-        results = calculate_item_results(items, choices, best, spu_multiplier=0, min_shop_price=999999)
+        results = calculate_item_results(items, choices, best, spu_multiplier=0)
 
         assert best["bonus"] == pytest.approx(0.0)
         # 税抜1000円 * 1% = 10円
@@ -565,5 +570,45 @@ class TestCalculateItemResults:
         """境界値: 商品が0件の場合、結果リストも空になる。"""
 
         best = evaluate([], (), max_shops=5, min_shop_price=1000, bonus_cap=1000, spu_multiplier=0)
-        results = calculate_item_results([], (), best, spu_multiplier=0, min_shop_price=1000)
+        results = calculate_item_results([], (), best, spu_multiplier=0)
         assert results == []
+
+
+# ===========================================================================
+# rakuten_rate_from_api
+# ===========================================================================
+
+
+class TestRakutenRateFromApi:
+    """楽天APIのpointRateを、通常の1%を除いた還元率に変換するテスト。"""
+
+    @pytest.mark.parametrize("point_rate, expected", [(1, 0), (2, 1), (4, 3), (10, 9)])
+    def test_通常の1パーセント分を差し引く(self, point_rate, expected):
+        assert rakuten_rate_from_api(point_rate) == expected
+
+    def test_1未満の値は0にする(self):
+        assert rakuten_rate_from_api(0) == 0
+
+
+# ===========================================================================
+# 商品数の上限
+# ===========================================================================
+
+
+class TestMaxProducts:
+    """組み合わせ探索が 2^n で増えるのを防ぐ商品数の上限のテスト。"""
+
+    def test_上限は15件(self):
+        assert MAX_PRODUCTS == 15
+
+    def test_上限ちょうどの商品数なら探索できる(self):
+        items = [make_item(name=f"商品{i}", ap=1000, rp=1100) for i in range(MAX_PRODUCTS)]
+        choices, best = find_best(
+            items, max_shops=10, min_shop_price=1000, bonus_cap=7000, spu_multiplier=0
+        )
+        assert len(choices) == MAX_PRODUCTS
+
+    def test_上限を超える商品数ではValueErrorになる(self):
+        items = [make_item(name=f"商品{i}") for i in range(MAX_PRODUCTS + 1)]
+        with pytest.raises(ValueError, match="15"):
+            find_best(items, max_shops=10, min_shop_price=1000, bonus_cap=7000, spu_multiplier=0)

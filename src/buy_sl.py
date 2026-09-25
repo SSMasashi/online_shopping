@@ -18,19 +18,24 @@ Streamlit Cloud の Secrets に以下を設定:
 ※保存JSONにも楽天APIの認証情報は保存されません。
 """
 
-import os
 import json
+import os
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
-import urllib.error
 
-import streamlit as st
 import gspread
+import streamlit as st
 from google.oauth2.service_account import Credentials
 
-from shopping.calc import calculate_item_results, evaluate, find_best
-
+from shopping.calc import (
+    MAX_PRODUCTS,
+    calculate_item_results,
+    evaluate,
+    find_best,
+    rakuten_rate_from_api,
+)
 
 # ===========================================================================
 # Streamlit設定
@@ -499,6 +504,11 @@ def load_named_data_from_google_sheets(save_id):
                         "rurl": cell("rurl", ""),
                     }
                 )
+
+    if len(loaded_products) > MAX_PRODUCTS:
+        raise ValueError(
+            f"保存データの商品が{len(loaded_products)}個あり、上限の{MAX_PRODUCTS}個を超えています。"
+        )
 
     if not loaded_products:
         loaded_products = [make_default_product()]
@@ -1055,6 +1065,7 @@ for i, item in enumerate(items):
             step=1,
             format="%d",
             key=f"rpt_{i}_{v}",
+            help="通常ポイント1%を除いた倍率を入力します（例: 楽天で5倍なら4）。",
             label_visibility="collapsed",
         )
 
@@ -1085,16 +1096,10 @@ for i, item in enumerate(items):
                     display_price = int(round(price))
 
                     # -------------------------------------------------------
-                    # 楽天還元率
-                    #
-                    # API取得値から1を引く
-                    #
-                    # API 4 → 表示 3
-                    # API 3 → 表示 2
-                    # API 1 → 表示 0
+                    # 楽天還元率（通常の1%を含まない値に変換）
                     # -------------------------------------------------------
 
-                    display_point_rate = max(int(point_rate) - 1, 0)
+                    display_point_rate = rakuten_rate_from_api(point_rate)
 
                     # -------------------------------------------------------
                     # 商品データを更新
@@ -1142,7 +1147,7 @@ col_a, col_b = st.columns(2)
 
 with col_a:
     if st.button("＋ 商品を追加"):
-        if len(st.session_state.products) < 15:
+        if len(st.session_state.products) < MAX_PRODUCTS:
             st.session_state.products.append(
                 {
                     "name": "",
@@ -1161,7 +1166,7 @@ with col_a:
             st.rerun()
 
         else:
-            st.warning("商品は最大15個までです。")
+            st.warning(f"商品は最大{MAX_PRODUCTS}個までです。")
 
 
 # ===========================================================================
@@ -1471,7 +1476,7 @@ if st.button("🧮 計算する", type="primary", use_container_width=True):
     # -----------------------------------------------------------------------
 
     item_results = calculate_item_results(
-        items, best_choices, best, st.session_state.spu_multiplier, st.session_state.min_shop_price
+        items, best_choices, best, st.session_state.spu_multiplier
     )
 
     # -----------------------------------------------------------------------
