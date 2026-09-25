@@ -119,7 +119,14 @@ token_uri = "https://oauth2.googleapis.com/token"
 ```
 online-shopping/
 ├── src/
-│   └── buy_sl.py            # Amazon×楽天 最安振り分け計算アプリ本体（Streamlit）
+│   ├── buy_sl.py            # アプリの入口（Streamlit Cloud が実行するファイル）
+│   └── shopping/
+│       ├── ui.py            # 画面の組み立て（main() と各部分の表示）
+│       ├── calc.py          # 最安の振り分け計算（Streamlit に依存しない）
+│       ├── rakuten.py       # 楽天APIからの価格・ポイント取得
+│       ├── storage.py       # Google Sheets への保存・読み込み・削除
+│       └── gsheets_app.py   # Secrets の読み込みと、保存処理のキャッシュ・画面状態の更新
+├── tests/                   # pytest のテスト（uv run pytest -v で実行）
 ├── .claude/
 │   ├── agents/              # Claude Codeのサブエージェント定義
 │   │   ├── code-reviewer.md # コードレビュー専門エージェント（修正は行わず指摘のみ）

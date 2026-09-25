@@ -25,6 +25,7 @@
 - テストでは Google Sheets や外部 API に実際にアクセスしないこと（計算ロジックを切り出してテストするか、モックを使う）
 
 ## ディレクトリ構成
-- src/ : アプリのソースコード（現在は buy_sl.py のみ）
+- src/ : アプリのソースコード。buy_sl.py は入口だけで、処理は src/shopping/ に分かれている（ui / calc / rakuten / storage / gsheets_app）
+- src/shopping/ のモジュールは、import しただけで st.* を実行しないこと（st.set_page_config は buy_sl.py で最初に呼ぶ）
 - tests/ : テストコード
 - .claude/ : サブエージェント定義（code-reviewer、test-engineer、doc-writer）とスラッシュコマンド（/review、/test）
