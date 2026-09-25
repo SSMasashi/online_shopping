@@ -21,7 +21,6 @@ from shopping.rakuten import (
     parse_item,
 )
 
-
 # ===========================================================================
 # テスト用ヘルパー
 # ===========================================================================
@@ -351,11 +350,7 @@ class TestFetchRakutenPriceAndPointFallbackTrigger:
         assert price == pytest.approx(1000.0)
         assert point_rate == 1
         assert len(fake.calls) == 2
-        assert fake.calls[1]["params"] == {
-            "shopCode": DEFAULT_SHOP,
-            "keyword": "item",
-            "hits": 30,
-        }
+        assert fake.calls[1]["params"] == {"shopCode": DEFAULT_SHOP, "keyword": "item", "hits": 30}
 
     def test_ステータス400なら検索し直しに進む(self):
         """RakutenApiErrorのstatus=400のときは、キーワード検索にフォールバックする。"""
@@ -543,6 +538,40 @@ class TestFetchRakutenPriceAndPointFallbackMatching:
         fake = FakeCallApi([EMPTY_ITEMS, wrap_items(other1, other2)])
 
         with pytest.raises(ValueError):
+            fetch_rakuten_price_and_point(DEFAULT_URL, "app", "key", "referer", call_api=fake)
+
+    def test_一致しないときのメッセージに原因調査用の情報が入る(self):
+        """
+        itemCode検索の結果（HTTPステータス）、検索し直しの件数、
+        上位の候補（商品名・itemCode・URL）をメッセージに含める。候補は最大3件。
+        """
+
+        others = [
+            {
+                **make_api_item(
+                    item_code=f"someshop:1000{i}",
+                    item_url=f"https://item.rakuten.co.jp/someshop/other{i}/",
+                ),
+                "itemName": f"別の商品{i}",
+            }
+            for i in range(4)
+        ]
+        fake = FakeCallApi([RakutenApiError("wrong_parameter", status=400), wrap_items(*others)])
+
+        with pytest.raises(ValueError) as exc:
+            fetch_rakuten_price_and_point(DEFAULT_URL, "app", "key", "referer", call_api=fake)
+
+        message = str(exc.value)
+        assert "HTTP 400" in message
+        assert "4件" in message
+        assert "別の商品0" in message and "someshop:10000" in message
+        assert "https://item.rakuten.co.jp/someshop/other2/" in message
+        assert "別の商品3" not in message
+
+    def test_検索し直しが0件ならそのことがメッセージに入る(self):
+        fake = FakeCallApi([EMPTY_ITEMS, EMPTY_ITEMS])
+
+        with pytest.raises(ValueError, match="0件"):
             fetch_rakuten_price_and_point(DEFAULT_URL, "app", "key", "referer", call_api=fake)
 
     def test_検索し直しの結果Itemsが空でもValueError(self):

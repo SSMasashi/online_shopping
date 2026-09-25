@@ -152,9 +152,13 @@ def fetch_rakuten_price_and_point(url, app_id, access_key, referer, call_api=cal
         if items:
             return parse_item(items[0]["Item"])
 
+        first_result = "0件"
+
     except RakutenApiError as e:
         if e.status not in NOT_FOUND_STATUSES:
             raise
+
+        first_result = f"HTTP {e.status}: {e}"
 
     # -----------------------------------------------------------------------
     # ショップ内をキーワード検索し、同じ商品だけを採用する
@@ -170,10 +174,25 @@ def fetch_rakuten_price_and_point(url, app_id, access_key, referer, call_api=cal
         {"shopCode": shop, "keyword": keyword, "hits": FALLBACK_HITS}, app_id, access_key, referer
     )
 
-    for entry in data.get("Items", []):
-        item = entry.get("Item", {})
+    candidates = [entry.get("Item", {}) for entry in data.get("Items", [])]
 
+    for item in candidates:
         if _is_same_item(item, shop, slug):
             return parse_item(item)
 
-    raise ValueError(f"URLの商品と一致する商品が見つかりませんでした（itemCode: {item_code}）")
+    raise ValueError(
+        f"URLの商品と一致する商品が見つかりませんでした（itemCode: {item_code}）\n"
+        f"・itemCodeでの取得: {first_result}\n"
+        f"・キーワード「{keyword}」での検索: {len(candidates)}件" + _describe_candidates(candidates)
+    )
+
+
+def _describe_candidates(candidates, limit=3):
+    """原因調査のため、検索結果の上位候補を文字列にする。"""
+
+    lines = [
+        f"\n  - {str(item.get('itemName', ''))[:40]} / {item.get('itemCode', '')} / {item.get('itemUrl', '')}"
+        for item in candidates[:limit]
+    ]
+
+    return "".join(lines)

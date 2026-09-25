@@ -32,6 +32,7 @@ from shopping.calc import (
     rakuten_rate_from_api,
 )
 from shopping.rakuten import fetch_rakuten_price_and_point
+from shopping.storage import SETTING_DEFAULTS, SheetStorage
 
 # ===========================================================================
 # Streamlit設定
@@ -93,22 +94,6 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-# 保存データは3シートで管理する。
-#
-# saved_data : 保存パターンの一覧
-# products   : 保存パターンごの商品データ
-# settings   : 保存パターンごとの設定値
-#
-# save_idを共通キーにすることで、複数パターンを安全に保存できる。
-
-SAVED_DATA_HEADERS = ["save_id", "name", "saved_at"]
-
-PRODUCT_HEADERS = ["save_id", "name", "ap", "apt", "baby", "rp", "rpt", "rurl"]
-
-SETTING_HEADERS = ["save_id", "setting", "value"]
-
-SETTING_DEFAULTS = {"max_shops": 10, "min_shop_price": 1000, "bonus_cap": 7000, "spu_multiplier": 0}
-
 
 def get_google_credentials():
     """Streamlit SecretsからGoogleサービスアカウント認証情報を作成する。"""
@@ -150,6 +135,8 @@ def get_google_credentials():
         ) from e
 
 
+# 認証とスプレッドシートは、rerun のたびに作り直さず使い回す。
+@st.cache_resource(show_spinner=False)
 def get_google_spreadsheet():
     """Google Sheetsを開く。"""
 
@@ -170,385 +157,50 @@ def get_google_spreadsheet():
         ) from e
 
 
-def get_or_create_worksheet(spreadsheet, title, rows=100, cols=10):
-    """指定したシートを取得し、なければ作成する。"""
+def get_storage():
+    return SheetStorage(get_google_spreadsheet())
 
-    try:
-        return spreadsheet.worksheet(title)
-    except gspread.WorksheetNotFound:
-        return spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
 
+# 保存一覧は入力のたびに読み直さないよう、60秒キャッシュする。
+# 保存・削除のあとは clear() して最新の一覧を読み直す。
+@st.cache_data(ttl=60, show_spinner=False)
+def get_saved_data_options():
+    """画面表示用の保存パターン一覧を取得する。"""
 
-def ensure_worksheet_size(ws, rows, cols):
-    """Google Sheetsのグリッドサイズを必要な大きさ以上にする。"""
-
-    try:
-        current_rows = int(ws.row_count)
-        current_cols = int(ws.col_count)
-    except Exception:
-        current_rows = 0
-        current_cols = 0
-
-    target_rows = max(current_rows, rows, 10)
-    target_cols = max(current_cols, cols, 2)
-
-    if current_rows < target_rows or current_cols < target_cols:
-        ws.resize(rows=target_rows, cols=target_cols)
-
-
-def normalize_bool(value):
-    if isinstance(value, bool):
-        return value
-
-    return str(value).strip().lower() in {"true", "1", "yes", "on"}
-
-
-def safe_int(value, default=0):
-    """Google Sheetsから取得した値を安全に整数へ変換する。"""
-
-    try:
-        if value is None or str(value).strip() == "":
-            return int(default)
-        return int(float(value))
-    except (TypeError, ValueError):
-        return int(default)
-
-
-def make_default_product():
-    """新規商品の初期値。"""
-
-    return {"name": "", "ap": 0, "apt": 1, "baby": False, "rp": 0, "rpt": 0, "rurl": ""}
-
-
-def get_current_products_for_save():
-    """現在の画面の商品の保存用データを作る。"""
-
-    result = []
-
-    for item in st.session_state.products:
-        result.append(
-            {
-                "name": str(item.get("name", "")),
-                "ap": safe_int(item.get("ap", 0)),
-                "apt": safe_int(item.get("apt", 1), 1),
-                "baby": bool(item.get("baby", False)),
-                "rp": safe_int(item.get("rp", 0)),
-                "rpt": safe_int(item.get("rpt", 0)),
-                "rurl": str(item.get("rurl", "")),
-            }
-        )
-
-    return result
-
-
-def get_current_settings_for_save():
-    """現在の画面の設定値を保存用辞書にする。"""
-
-    return {
-        "max_shops": safe_int(st.session_state.get("max_shops", 10), 10),
-        "min_shop_price": safe_int(st.session_state.get("min_shop_price", 1000), 1000),
-        "bonus_cap": safe_int(st.session_state.get("bonus_cap", 7000), 7000),
-        "spu_multiplier": safe_int(st.session_state.get("spu_multiplier", 0), 0),
-    }
-
-
-def read_saved_data_list(spreadsheet):
-    """保存パターン一覧を返す。"""
-
-    ws = get_or_create_worksheet(spreadsheet, "saved_data", rows=100, cols=len(SAVED_DATA_HEADERS))
-
-    values = ws.get_all_values()
-    records = []
-
-    if not values:
-        return records
-
-    header = [str(x).strip() for x in values[0]]
-
-    try:
-        indexes = {name: header.index(name) for name in SAVED_DATA_HEADERS}
-    except ValueError:
-        return records
-
-    for row in values[1:]:
-
-        def cell(name):
-            idx = indexes[name]
-            return row[idx] if idx < len(row) else ""
-
-        save_id = str(cell("save_id")).strip()
-        name = str(cell("name")).strip()
-
-        if not save_id or not name:
-            continue
-
-        records.append(
-            {"save_id": save_id, "name": name, "saved_at": str(cell("saved_at")).strip()}
-        )
-
-    return records
-
-
-def write_saved_data_list(spreadsheet, records):
-    """保存パターン一覧を書き込む。"""
-
-    ws = get_or_create_worksheet(spreadsheet, "saved_data", rows=100, cols=len(SAVED_DATA_HEADERS))
-
-    values = [SAVED_DATA_HEADERS]
-
-    for record in records:
-        values.append(
-            [record.get("save_id", ""), record.get("name", ""), record.get("saved_at", "")]
-        )
-
-    ensure_worksheet_size(ws, max(100, len(values) + 5), len(SAVED_DATA_HEADERS))
-
-    ws.clear()
-    ws.update("A1", values, value_input_option="USER_ENTERED")
-
-
-def write_products_for_save(spreadsheet, save_id, products):
-    """指定save_idの商品データを書き込む。"""
-
-    ws = get_or_create_worksheet(spreadsheet, "products", rows=200, cols=len(PRODUCT_HEADERS))
-
-    values = [PRODUCT_HEADERS]
-
-    for item in products:
-        values.append(
-            [
-                save_id,
-                item.get("name", ""),
-                safe_int(item.get("ap", 0)),
-                safe_int(item.get("apt", 1), 1),
-                bool(item.get("baby", False)),
-                safe_int(item.get("rp", 0)),
-                safe_int(item.get("rpt", 0)),
-                item.get("rurl", ""),
-            ]
-        )
-
-    ensure_worksheet_size(ws, max(200, len(values) + 5), len(PRODUCT_HEADERS))
-
-    existing = ws.get_all_values()
-
-    if existing:
-        header = [str(x).strip() for x in existing[0]]
-    else:
-        header = []
-
-    # 現在の新形式でなければ、既存の旧データを一度新形式へ移行する。
-    old_rows = []
-
-    if header == PRODUCT_HEADERS:
-        for row in existing[1:]:
-            if not row:
-                continue
-            row_save_id = row[0].strip() if len(row) > 0 else ""
-            if row_save_id and row_save_id != save_id:
-                old_rows.append(row[: len(PRODUCT_HEADERS)])
-
-    final_values = [PRODUCT_HEADERS] + old_rows + values[1:]
-
-    ws.clear()
-    ws.update("A1", final_values, value_input_option="USER_ENTERED")
-
-
-def write_settings_for_save(spreadsheet, save_id, settings):
-    """指定save_idの設定データを書き込む。"""
-
-    ws = get_or_create_worksheet(spreadsheet, "settings", rows=100, cols=len(SETTING_HEADERS))
-
-    existing = ws.get_all_values()
-
-    old_rows = []
-
-    if existing:
-        header = [str(x).strip() for x in existing[0]]
-
-        if header == SETTING_HEADERS:
-            for row in existing[1:]:
-                if not row:
-                    continue
-                row_save_id = row[0].strip() if len(row) > 0 else ""
-                if row_save_id and row_save_id != save_id:
-                    old_rows.append(row[: len(SETTING_HEADERS)])
-
-    new_rows = []
-
-    for key in ("max_shops", "min_shop_price", "bonus_cap", "spu_multiplier"):
-        new_rows.append([save_id, key, safe_int(settings.get(key), SETTING_DEFAULTS[key])])
-
-    final_values = [SETTING_HEADERS] + old_rows + new_rows
-
-    ensure_worksheet_size(ws, max(100, len(final_values) + 5), len(SETTING_HEADERS))
-
-    ws.clear()
-    ws.update("A1", final_values, value_input_option="USER_ENTERED")
+    return get_storage().list_saved()
 
 
 def save_named_data_to_google_sheets(save_name, overwrite_save_id=None):
     """現在の画面を指定した名前で保存する。"""
 
-    save_name = str(save_name).strip()
+    settings = {
+        key: st.session_state.get(key, default) for key, default in SETTING_DEFAULTS.items()
+    }
 
-    if not save_name:
-        raise ValueError("保存名を入力してください。")
+    try:
+        save_id, save_name = get_storage().save(
+            save_name, st.session_state.products, settings, overwrite_save_id=overwrite_save_id
+        )
+    finally:
+        get_saved_data_options.clear()
 
-    if len(save_name) > 50:
-        raise ValueError("保存名は50文字以内で入力してください。")
-
-    spreadsheet = get_google_spreadsheet()
-    records = read_saved_data_list(spreadsheet)
-
-    # 同名の保存データがあれば、そのIDを使って上書きできる。
-    target_id = overwrite_save_id
-
-    if not target_id:
-        same_name = [r for r in records if r["name"] == save_name]
-        if same_name:
-            target_id = same_name[0]["save_id"]
-
-    if not target_id:
-        import uuid
-
-        target_id = uuid.uuid4().hex
-
-    from datetime import datetime
-
-    saved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    updated = False
-
-    for record in records:
-        if record["save_id"] == target_id:
-            record["name"] = save_name
-            record["saved_at"] = saved_at
-            updated = True
-            break
-
-    if not updated:
-        records.append({"save_id": target_id, "name": save_name, "saved_at": saved_at})
-
-    write_saved_data_list(spreadsheet, records)
-
-    write_products_for_save(spreadsheet, target_id, get_current_products_for_save())
-
-    write_settings_for_save(spreadsheet, target_id, get_current_settings_for_save())
-
-    st.session_state.current_save_id = target_id
+    st.session_state.current_save_id = save_id
     st.session_state.current_save_name = save_name
 
 
 def load_named_data_from_google_sheets(save_id):
-    """指定save_idの保存データを読み込む。"""
+    """指定save_idの保存データを読み込み、画面に反映する。"""
 
-    if not save_id:
-        raise ValueError("読み込む保存データを選択してください。")
+    record, products, settings = get_storage().load(save_id)
 
-    spreadsheet = get_google_spreadsheet()
-    records = read_saved_data_list(spreadsheet)
+    st.session_state.products = products
 
-    target = next((record for record in records if record["save_id"] == save_id), None)
+    for key in SETTING_DEFAULTS:
+        st.session_state[key] = settings[key]
 
-    if target is None:
-        raise ValueError("指定された保存データが見つかりません。")
-
-    # -----------------------------------------------------------------------
-    # 商品
-    # -----------------------------------------------------------------------
-
-    products_ws = get_or_create_worksheet(
-        spreadsheet, "products", rows=200, cols=len(PRODUCT_HEADERS)
-    )
-
-    product_values = products_ws.get_all_values()
-    loaded_products = []
-
-    if product_values:
-        header = [str(x).strip() for x in product_values[0]]
-
-        try:
-            indexes = {name: header.index(name) for name in PRODUCT_HEADERS}
-        except ValueError:
-            indexes = None
-
-        if indexes is not None:
-            for row in product_values[1:]:
-
-                def cell(name, default=""):
-                    idx = indexes[name]
-                    return row[idx] if idx < len(row) else default
-
-                if str(cell("save_id")).strip() != save_id:
-                    continue
-
-                if not any(str(cell(name)).strip() for name in PRODUCT_HEADERS[1:]):
-                    continue
-
-                loaded_products.append(
-                    {
-                        "name": cell("name", ""),
-                        "ap": safe_int(cell("ap", 0)),
-                        "apt": safe_int(cell("apt", 1), 1),
-                        "baby": normalize_bool(cell("baby", False)),
-                        "rp": safe_int(cell("rp", 0)),
-                        "rpt": safe_int(cell("rpt", 0)),
-                        "rurl": cell("rurl", ""),
-                    }
-                )
-
-    if len(loaded_products) > MAX_PRODUCTS:
-        raise ValueError(
-            f"保存データの商品が{len(loaded_products)}個あり、上限の{MAX_PRODUCTS}個を超えています。"
-        )
-
-    if not loaded_products:
-        loaded_products = [make_default_product()]
-
-    # -----------------------------------------------------------------------
-    # 設定
-    # -----------------------------------------------------------------------
-
-    settings_ws = get_or_create_worksheet(
-        spreadsheet, "settings", rows=100, cols=len(SETTING_HEADERS)
-    )
-
-    setting_map = dict(SETTING_DEFAULTS)
-    setting_values = settings_ws.get_all_values()
-
-    if setting_values:
-        header = [str(x).strip() for x in setting_values[0]]
-
-        try:
-            indexes = {name: header.index(name) for name in SETTING_HEADERS}
-        except ValueError:
-            indexes = None
-
-        if indexes is not None:
-            for row in setting_values[1:]:
-
-                def cell(name, default=""):
-                    idx = indexes[name]
-                    return row[idx] if idx < len(row) else default
-
-                if str(cell("save_id")).strip() != save_id:
-                    continue
-
-                key = str(cell("setting")).strip()
-
-                if key in SETTING_DEFAULTS:
-                    setting_map[key] = safe_int(cell("value"), SETTING_DEFAULTS[key])
-
-    st.session_state.products = loaded_products
-    st.session_state.max_shops = setting_map["max_shops"]
-    st.session_state.min_shop_price = setting_map["min_shop_price"]
-    st.session_state.bonus_cap = setting_map["bonus_cap"]
-    st.session_state.spu_multiplier = setting_map["spu_multiplier"]
-
-    st.session_state.current_save_id = target["save_id"]
-    st.session_state.current_save_name = target["name"]
-    st.session_state.selected_saved_data_id = target["save_id"]
+    st.session_state.current_save_id = record["save_id"]
+    st.session_state.current_save_name = record["name"]
+    st.session_state.selected_saved_data_id = record["save_id"]
 
     st.session_state.widget_version = int(st.session_state.get("widget_version", 0)) + 1
 
@@ -556,60 +208,17 @@ def load_named_data_from_google_sheets(save_id):
 def delete_named_data_from_google_sheets(save_id):
     """指定save_idの保存データを削除する。"""
 
-    if not save_id:
-        raise ValueError("削除する保存データを選択してください。")
-
-    spreadsheet = get_google_spreadsheet()
-    records = read_saved_data_list(spreadsheet)
-
-    target = next((record for record in records if record["save_id"] == save_id), None)
-
-    if target is None:
-        raise ValueError("削除する保存データが見つかりません。")
-
-    remaining = [record for record in records if record["save_id"] != save_id]
-
-    write_saved_data_list(spreadsheet, remaining)
-
-    # products / settingsからも対象IDの行を削除する。
-    for sheet_name, headers in (("products", PRODUCT_HEADERS), ("settings", SETTING_HEADERS)):
-        ws = get_or_create_worksheet(spreadsheet, sheet_name, rows=100, cols=len(headers))
-
-        values = ws.get_all_values()
-
-        if not values:
-            continue
-
-        header = [str(x).strip() for x in values[0]]
-
-        if header != headers:
-            continue
-
-        keep = [values[0]]
-
-        for row in values[1:]:
-            row_save_id = row[0].strip() if row else ""
-            if row_save_id != save_id:
-                keep.append(row)
-
-        ws.clear()
-        ws.update("A1", keep, value_input_option="USER_ENTERED")
+    try:
+        remaining = get_storage().delete(save_id)
+    finally:
+        get_saved_data_options.clear()
 
     if st.session_state.get("current_save_id") == save_id:
         st.session_state.current_save_id = ""
         st.session_state.current_save_name = ""
 
-    remaining_ids = [record["save_id"] for record in remaining]
-
     if st.session_state.get("selected_saved_data_id") == save_id:
-        st.session_state.selected_saved_data_id = remaining_ids[0] if remaining_ids else ""
-
-
-def get_saved_data_options():
-    """画面表示用の保存パターン一覧を取得する。"""
-
-    spreadsheet = get_google_spreadsheet()
-    return read_saved_data_list(spreadsheet)
+        st.session_state.selected_saved_data_id = remaining[0]["save_id"] if remaining else ""
 
 
 # ===========================================================================
@@ -989,7 +598,8 @@ for i, item in enumerate(items):
 
     if message:
         if message.startswith("取得エラー"):
-            st.error(message)
+            # Markdownでは改行1つが無視されるため、行末に空白2つを付けて改行させる。
+            st.error(message.replace("\n", "  \n"))
 
         elif message.startswith("楽天商品URLを入力"):
             st.warning(message)
