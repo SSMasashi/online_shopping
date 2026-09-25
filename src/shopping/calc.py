@@ -9,6 +9,12 @@ from itertools import product
 # 組み合わせ探索は 2^n 通りになるため、商品数に上限を設ける。
 MAX_PRODUCTS = 15
 
+# 消費税率。楽天のポイントは税抜価格にかかる。
+TAX_RATE = 0.10
+
+# らくベビ割（Amazon）の対象商品は10%OFF。
+BABY_DISCOUNT_RATE = 0.9
+
 
 # ===========================================================================
 # 楽天還元率
@@ -29,7 +35,7 @@ def rakuten_rate_from_api(point_rate):
 # ===========================================================================
 
 
-def tax_excluded_price(price, tax_rate=0.10):
+def tax_excluded_price(price, tax_rate=TAX_RATE):
     """
     税込価格から税抜価格を計算する。
     """
@@ -47,7 +53,7 @@ def amazon_cost(item):
     10%OFF後の価格を基準に計算。
     """
 
-    price = item["ap"] * 0.9 if item["baby"] else item["ap"]
+    price = item["ap"] * BABY_DISCOUNT_RATE if item["baby"] else item["ap"]
 
     points = price * (item["apt"] / 100)
 

@@ -1,21 +1,14 @@
 """
-Amazon vs 楽天 最安振り分け計算
-ブラウザ実行版 / Streamlit
-
-実行方法:
-    pip install streamlit
-
-Streamlit Cloud の Secrets に以下を設定:
-
-    RAKUTEN_APP_ID = "あなたの楽天アプリケーションID"
-    RAKUTEN_ACCESS_KEY = "あなたの楽天アクセスキー"
-    RAKUTEN_REFERER = "楽天APIに登録したURL"
+Amazon vs 楽天 最安振り分け計算（Streamlit アプリの入口）
 
 ローカルで実行:
-    streamlit run buy.py
+    uv sync
+    uv run streamlit run src/buy_sl.py
 
-※楽天APIの認証情報はアプリ画面には表示されません。
-※保存JSONにも楽天APIの認証情報は保存されません。
+必要な Secrets（ローカルは .streamlit/secrets.toml、本番は Streamlit Cloud の Secrets）は
+README.md を参照。楽天APIの認証情報は画面にも Google Sheets にも出さない。
+
+計算は shopping.calc、楽天APIは shopping.rakuten、保存は shopping.storage にある。
 """
 
 import os
@@ -32,7 +25,7 @@ from shopping.calc import (
     rakuten_rate_from_api,
 )
 from shopping.rakuten import fetch_rakuten_price_and_point
-from shopping.storage import SETTING_DEFAULTS, SheetStorage
+from shopping.storage import SETTING_DEFAULTS, SheetStorage, make_default_product
 
 # ===========================================================================
 # Streamlit設定
@@ -89,10 +82,8 @@ RAKUTEN_REFERER = get_secret_or_env("RAKUTEN_REFERER")
 
 GOOGLE_SHEET_ID = get_secret_or_env("GOOGLE_SHEET_ID")
 
-GOOGLE_SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
+# スプレッドシートはIDで開くので、Driveの権限は不要。
+GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 def get_google_credentials():
@@ -309,20 +300,9 @@ if "selected_saved_data_id" not in st.session_state:
     st.session_state.selected_saved_data_id = ""
 
 
-if "max_shops" not in st.session_state:
-    st.session_state.max_shops = 10
-
-
-if "min_shop_price" not in st.session_state:
-    st.session_state.min_shop_price = 1000
-
-
-if "bonus_cap" not in st.session_state:
-    st.session_state.bonus_cap = 7000
-
-
-if "spu_multiplier" not in st.session_state:
-    st.session_state.spu_multiplier = 0
+for _key, _default in SETTING_DEFAULTS.items():
+    if _key not in st.session_state:
+        st.session_state[_key] = _default
 
 
 # ===========================================================================
@@ -551,7 +531,7 @@ for i, item in enumerate(items):
             url = st.session_state.get(f"rurl_{i}_{v}", "").strip()
 
             if not url:
-                st.session_state[f"rakuten_message_{i}"] = "楽天商品URLを入力してください"
+                item["_message"] = ("warning", "楽天商品URLを入力してください")
 
             else:
                 try:
@@ -563,7 +543,7 @@ for i, item in enumerate(items):
                     # 楽天価格
                     # -------------------------------------------------------
 
-                    display_price = int(round(price))
+                    display_price = round(price)
 
                     # -------------------------------------------------------
                     # 楽天還元率（通常の1%を含まない値に変換）
@@ -581,30 +561,27 @@ for i, item in enumerate(items):
 
                     item["rurl"] = url
 
-                    st.session_state[f"rakuten_message_{i}"] = "楽天の商品情報を取得しました"
+                    item["_message"] = ("success", "楽天の商品情報を取得しました")
 
                     st.session_state.widget_version += 1
 
                     st.rerun()
 
                 except Exception as e:
-                    st.session_state[f"rakuten_message_{i}"] = f"取得エラー：{e}"
+                    item["_message"] = ("error", f"取得エラー：{e}")
 
     # -----------------------------------------------------------------------
     # URL取得メッセージ
+    #
+    # 行番号ではなく商品自体に持たせるので、商品を削除してもずれない。
+    # 一度表示したら消す。
     # -----------------------------------------------------------------------
 
-    message = st.session_state.get(f"rakuten_message_{i}")
+    message = item.pop("_message", None)
 
     if message:
-        if message.startswith("取得エラー"):
-            st.error(message)
-
-        elif message.startswith("楽天商品URLを入力"):
-            st.warning(message)
-
-        else:
-            st.success(message)
+        kind, text = message
+        {"error": st.error, "warning": st.warning}.get(kind, st.success)(text)
 
     st.divider()
 
@@ -618,18 +595,7 @@ col_a, col_b = st.columns(2)
 with col_a:
     if st.button("＋ 商品を追加"):
         if len(st.session_state.products) < MAX_PRODUCTS:
-            st.session_state.products.append(
-                {
-                    "name": "",
-                    "ap": 0,
-                    # ★新規商品のAmazon還元率は1%
-                    "apt": 1,
-                    "baby": False,
-                    "rp": 0,
-                    "rpt": 0,
-                    "rurl": "",
-                }
-            )
+            st.session_state.products.append(make_default_product())
 
             st.session_state.widget_version += 1
 
@@ -900,58 +866,39 @@ st.caption("楽天APIの認証情報はGoogle Sheetsには保存されません�
 # 計算
 # ===========================================================================
 
-if st.button("🧮 計算する", type="primary", use_container_width=True):
-    items = st.session_state.products
 
-    # -----------------------------------------------------------------------
-    # すべてAmazon
-    # -----------------------------------------------------------------------
+def current_calc_inputs():
+    """計算結果が今の入力に対するものかを判定するための値（表示用の一時データは除く）。"""
 
-    all_a = evaluate(
-        items,
-        ["A"] * len(items),
-        st.session_state.max_shops,
-        st.session_state.min_shop_price,
-        st.session_state.bonus_cap,
-        st.session_state.spu_multiplier,
+    products = [
+        {key: value for key, value in item.items() if not key.startswith("_")}
+        for item in st.session_state.products
+    ]
+    settings = {key: st.session_state[key] for key in SETTING_DEFAULTS}
+
+    return products, settings
+
+
+def calculate_all(items, settings):
+    """すべてAmazon・すべて楽天・最適な振り分けを計算する。"""
+
+    args = (
+        settings["max_shops"],
+        settings["min_shop_price"],
+        settings["bonus_cap"],
+        settings["spu_multiplier"],
     )
 
-    # -----------------------------------------------------------------------
-    # すべて楽天
-    # -----------------------------------------------------------------------
+    all_a = evaluate(items, ["A"] * len(items), *args)
+    all_r = evaluate(items, ["R"] * len(items), *args)
+    best_choices, best = find_best(items, *args)
+    item_results = calculate_item_results(items, best_choices, best, settings["spu_multiplier"])
 
-    all_r = evaluate(
-        items,
-        ["R"] * len(items),
-        st.session_state.max_shops,
-        st.session_state.min_shop_price,
-        st.session_state.bonus_cap,
-        st.session_state.spu_multiplier,
-    )
+    return {"all_a": all_a, "all_r": all_r, "best": best, "item_results": item_results}
 
-    # -----------------------------------------------------------------------
-    # 最適な振り分け
-    # -----------------------------------------------------------------------
 
-    best_choices, best = find_best(
-        items,
-        st.session_state.max_shops,
-        st.session_state.min_shop_price,
-        st.session_state.bonus_cap,
-        st.session_state.spu_multiplier,
-    )
-
-    # -----------------------------------------------------------------------
-    # 商品ごとの結果を計算
-    # -----------------------------------------------------------------------
-
-    item_results = calculate_item_results(
-        items, best_choices, best, st.session_state.spu_multiplier
-    )
-
-    # -----------------------------------------------------------------------
-    # 結果
-    # -----------------------------------------------------------------------
+def render_results(all_a, all_r, best, item_results):
+    """計算結果を表示する。"""
 
     st.subheader("🧮 計算結果")
 
@@ -1111,3 +1058,28 @@ if st.button("🧮 計算する", type="primary", use_container_width=True):
         st.write(f"ポイント合計：{point(best['total_points'])}")
 
         st.write(f"**実質負担額：{yen(best['net'])}**")
+
+
+# 計算結果は session_state に残し、ほかの入力を触っても消えないようにする。
+# ただし計算後に入力が変わった場合は、古い結果を出さずに再計算を促す。
+if st.button("🧮 計算する", type="primary", use_container_width=True):
+    inputs = current_calc_inputs()
+
+    try:
+        st.session_state.calc_result = {"inputs": inputs, **calculate_all(*inputs)}
+    except ValueError as e:
+        st.session_state.pop("calc_result", None)
+        st.error(str(e))
+
+calc_result = st.session_state.get("calc_result")
+
+if calc_result:
+    if calc_result["inputs"] != current_calc_inputs():
+        st.info("入力が変わりました。「計算する」を押すと再計算します。")
+    else:
+        render_results(
+            calc_result["all_a"],
+            calc_result["all_r"],
+            calc_result["best"],
+            calc_result["item_results"],
+        )
