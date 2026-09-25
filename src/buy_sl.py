@@ -600,8 +600,7 @@ for i, item in enumerate(items):
 
     if message:
         if message.startswith("取得エラー"):
-            # Markdownでは改行1つが無視されるため、行末に空白2つを付けて改行させる。
-            st.error(message.replace("\n", "  \n"))
+            st.error(message)
 
         elif message.startswith("楽天商品URLを入力"):
             st.warning(message)

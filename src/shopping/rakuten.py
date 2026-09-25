@@ -186,45 +186,31 @@ def fetch_item_page(url):
         return raw.decode("utf-8", errors="replace")
 
 
-def _describe_page(html):
-    """原因調査のため、取得した商品ページの概要を文字列にする。"""
-
-    title = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
-    title_text = re.sub(r"\s+", " ", title.group(1)).strip()[:60] if title else "(なし)"
-    markers = ", ".join(
-        f"{name}:{'あり' if name in html else 'なし'}"
-        for name in ("manageNumber", "itemId", "item_id=")
-    )
-
-    return f"（{len(html)}文字 / タイトル: {title_text} / {markers}）"
+NOT_FOUND_MESSAGE = "URLの商品と一致する商品が見つかりませんでした"
 
 
 def _fetch_via_item_page(shop, slug, app_id, access_key, referer, call_api, fetch_page):
-    """
-    商品ページから内部番号を読み取り、その itemCode で API から取得する。
-
-    戻り値は (取得結果 or None, 調査用の説明)。
-    """
+    """商品ページから内部番号を読み取り、その itemCode で API から取得する。取れなければ None。"""
 
     try:
         html = fetch_page(f"https://{RAKUTEN_ITEM_HOST}/{shop}/{slug}/")
         item_id = extract_item_id(html, slug)
 
         if item_id is None:
-            return None, "内部番号が見つかりませんでした" + _describe_page(html)
+            return None
 
         data = call_api({"itemCode": f"{shop}:{item_id}"}, app_id, access_key, referer)
 
-    except RakutenApiError as e:
-        return None, f"失敗（{e}）"
+    except RakutenApiError:
+        return None
 
     for entry in data.get("Items", []):
         item = entry.get("Item", {})
 
         if _is_same_item(item, shop, slug):
-            return parse_item(item), f"内部番号 {item_id} で取得"
+            return parse_item(item)
 
-    return None, f"内部番号 {item_id} の商品がURLと一致しませんでした"
+    return None
 
 
 def fetch_rakuten_price_and_point(
@@ -253,34 +239,27 @@ def fetch_rakuten_price_and_point(
         raise RakutenApiError("楽天APIのRAKUTEN_REFERERがStreamlit Secretsに設定されていません。")
 
     shop, slug = extract_shop_and_slug(url)
-    item_code = f"{shop}:{slug}"
 
     # -----------------------------------------------------------------------
     # itemCode で直接取得
     # -----------------------------------------------------------------------
 
     try:
-        data = call_api({"itemCode": item_code}, app_id, access_key, referer)
+        data = call_api({"itemCode": f"{shop}:{slug}"}, app_id, access_key, referer)
         items = data.get("Items", [])
 
         if items:
             return parse_item(items[0]["Item"])
 
-        first_result = "0件"
-
     except RakutenApiError as e:
         if e.status not in NOT_FOUND_STATUSES:
             raise
-
-        first_result = f"HTTP {e.status}: {e}"
 
     # -----------------------------------------------------------------------
     # 商品ページの内部番号で itemCode を作り直す
     # -----------------------------------------------------------------------
 
-    result, page_result = _fetch_via_item_page(
-        shop, slug, app_id, access_key, referer, call_api, fetch_page
-    )
+    result = _fetch_via_item_page(shop, slug, app_id, access_key, referer, call_api, fetch_page)
 
     if result is not None:
         return result
@@ -293,36 +272,16 @@ def fetch_rakuten_price_and_point(
     keyword = words[0] if words else ""
 
     if len(keyword) < 2:
-        raise ValueError(
-            f"商品が見つかりませんでした（itemCode: {item_code}）\n"
-            f"・itemCodeでの取得: {first_result}\n"
-            f"・商品ページからの取得: {page_result}"
-        )
+        raise ValueError(NOT_FOUND_MESSAGE)
 
     data = call_api(
         {"shopCode": shop, "keyword": keyword, "hits": FALLBACK_HITS}, app_id, access_key, referer
     )
 
-    candidates = [entry.get("Item", {}) for entry in data.get("Items", [])]
+    for entry in data.get("Items", []):
+        item = entry.get("Item", {})
 
-    for item in candidates:
         if _is_same_item(item, shop, slug):
             return parse_item(item)
 
-    raise ValueError(
-        f"URLの商品と一致する商品が見つかりませんでした（itemCode: {item_code}）\n"
-        f"・itemCodeでの取得: {first_result}\n"
-        f"・商品ページからの取得: {page_result}\n"
-        f"・キーワード「{keyword}」での検索: {len(candidates)}件" + _describe_candidates(candidates)
-    )
-
-
-def _describe_candidates(candidates, limit=3):
-    """原因調査のため、検索結果の上位候補を文字列にする。"""
-
-    lines = [
-        f"\n  - {str(item.get('itemName', ''))[:40]} / {item.get('itemCode', '')} / {item.get('itemUrl', '')}"
-        for item in candidates[:limit]
-    ]
-
-    return "".join(lines)
+    raise ValueError(NOT_FOUND_MESSAGE)

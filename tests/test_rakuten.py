@@ -551,40 +551,6 @@ class TestFetchRakutenPriceAndPointFallbackMatching:
         with pytest.raises(ValueError):
             fetch_rakuten_price_and_point(DEFAULT_URL, "app", "key", "referer", call_api=fake)
 
-    def test_一致しないときのメッセージに原因調査用の情報が入る(self):
-        """
-        itemCode検索の結果（HTTPステータス）、検索し直しの件数、
-        上位の候補（商品名・itemCode・URL）をメッセージに含める。候補は最大3件。
-        """
-
-        others = [
-            {
-                **make_api_item(
-                    item_code=f"someshop:1000{i}",
-                    item_url=f"https://item.rakuten.co.jp/someshop/other{i}/",
-                ),
-                "itemName": f"別の商品{i}",
-            }
-            for i in range(4)
-        ]
-        fake = FakeCallApi([RakutenApiError("wrong_parameter", status=400), wrap_items(*others)])
-
-        with pytest.raises(ValueError) as exc:
-            fetch_rakuten_price_and_point(DEFAULT_URL, "app", "key", "referer", call_api=fake)
-
-        message = str(exc.value)
-        assert "HTTP 400" in message
-        assert "4件" in message
-        assert "別の商品0" in message and "someshop:10000" in message
-        assert "https://item.rakuten.co.jp/someshop/other2/" in message
-        assert "別の商品3" not in message
-
-    def test_検索し直しが0件ならそのことがメッセージに入る(self):
-        fake = FakeCallApi([EMPTY_ITEMS, EMPTY_ITEMS])
-
-        with pytest.raises(ValueError, match="0件"):
-            fetch_rakuten_price_and_point(DEFAULT_URL, "app", "key", "referer", call_api=fake)
-
     def test_検索し直しの結果Itemsが空でもValueError(self):
         """境界値: キーワード検索でもItemsが空配列なら一致する商品が無くValueErrorになる。"""
 
@@ -720,7 +686,7 @@ class TestFetchViaItemPage:
                 self.URL, "app", "key", "referer", call_api=fake, fetch_page=lambda u: PAGE_WITH_SKU
             )
 
-    def test_ページの取得に失敗したらキーワード検索に進み結果をメッセージに残す(self):
+    def test_ページの取得に失敗したらキーワード検索に進む(self):
         fake = FakeCallApi([RakutenApiError("itemCode is not valid", status=400), EMPTY_ITEMS])
 
         def broken_fetch_page(url):
@@ -731,7 +697,7 @@ class TestFetchViaItemPage:
                 self.URL, "app", "key", "referer", call_api=fake, fetch_page=broken_fetch_page
             )
 
-        assert "商品ページ" in str(exc.value)
+        assert str(exc.value) == "URLの商品と一致する商品が見つかりませんでした"
         assert fake.calls[-1]["params"]["keyword"] == "a62938xxx"
 
     def test_URLのitemCodeで取れたときは商品ページを取得しない(self):
@@ -746,24 +712,25 @@ class TestFetchViaItemPage:
         assert price == 500.0
 
 
-class TestItemPageDiagnostics:
-    """商品ページで内部番号が見つからないとき、原因調査用の情報をメッセージに出すテスト。"""
+class TestNotFoundMessage:
+    """取得できなかったときのメッセージは、調査用の情報を含まない1行だけにする。"""
 
-    def test_ページのタイトルと文字数と手がかりの有無がメッセージに入る(self):
-        page = "<html><head><title>アクセスが集中しています</title></head><body>wait</body></html>"
-        fake = FakeCallApi([RakutenApiError("itemCode is not valid", status=400), EMPTY_ITEMS])
+    def test_どの手段でも見つからなければ簡潔なメッセージだけ(self):
+        other = make_api_item(
+            item_code="someshop:other", item_url="https://item.rakuten.co.jp/someshop/other/"
+        )
+        fake = FakeCallApi(
+            [RakutenApiError("itemCode is not valid", status=400), wrap_items(other)]
+        )
 
         with pytest.raises(ValueError) as exc:
             fetch_rakuten_price_and_point(
-                "https://item.rakuten.co.jp/netbaby/a62938xxx/",
+                DEFAULT_URL,
                 "app",
                 "key",
                 "referer",
                 call_api=fake,
-                fetch_page=lambda url: page,
+                fetch_page=lambda url: "<html></html>",
             )
 
-        message = str(exc.value)
-        assert "アクセスが集中しています" in message
-        assert f"{len(page)}文字" in message
-        assert "manageNumber:なし" in message
+        assert str(exc.value) == "URLの商品と一致する商品が見つかりませんでした"
